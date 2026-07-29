@@ -1,0 +1,28 @@
+# Changelog
+
+Notable user-facing changes to `susu` are documented in this file. The README describes the current behavior, while this file records version-specific changes.
+
+## [0.1]
+
+### Added
+
+- The `init`, `add`, `rm`, `list`, `show`, and `apply` commands.
+- Management of public dotfiles as repository snapshots and sensitive dotfiles as authenticated ciphertext.
+- Password-protected repository master keys with per-file AES-256-GCM encryption.
+- Portable HOME and XDG logical paths for sharing one dotfiles repository across machines.
+- Explicit `darwin` and `linux` platform exclusions.
+- Recursive directory discovery with conservative symlink and special-file handling.
+- Preflighted, confined, atomic restoration of public and sensitive files.
+- Machine-local active-repository binding and repository-operation locking.
+
+### Known limitations
+
+- Only macOS (`darwin`) and Linux (`linux`) are supported.
+- One installation binds to one active repository at a time.
+- `add` snapshots only new entries; it does not update entries that are already managed.
+- There are no `sync`, `status`, `diff`, password-rotation, conflict-handling, or backup commands.
+- `show` accepts one path per invocation.
+- Shell glob expansion is delegated to the shell, and symlinks are not managed.
+- Passwords and keys are not cached, and there is no Keychain or Secret Service integration.
+- Input files are limited to 512 MiB. Serialized repository sources and aggregate sensitive `apply` preflight plaintext are limited to 1 GiB.
+- A crash during `apply` can leave a mode-`0600` plaintext staging file until a later `apply` removes it.
