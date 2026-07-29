@@ -26,23 +26,30 @@ From the repository root, build with mise:
 
 ```bash
 mise install
-mise exec -- go build ./cmd/susu
+mise exec -- make
 ```
 
 Or use an already installed compatible Go toolchain:
 
 ```bash
-go build ./cmd/susu
+make
 ```
 
-Either command builds `./susu`. To install that locally without a package manager:
+The Makefile builds a minimal `./susu` executable with CGO disabled, filesystem and VCS paths omitted, and linker symbols and DWARF data stripped. Remove the binary with `make clean`.
+
+To build and install the binary with Go:
 
 ```bash
-mkdir -p "$HOME/.local/bin"
-install -m 0755 ./susu "$HOME/.local/bin/susu"
+make install
 ```
 
-Ensure `$HOME/.local/bin` is on `PATH`. No package-manager or prebuilt-release installation is assumed here.
+When using the pinned mise toolchain, run `mise exec -- make install` instead. The target uses `go install`, which writes `susu` to `GOBIN` or, when `GOBIN` is unset, to the `bin` directory under `go env GOPATH`. To install into `$HOME/.local/bin` explicitly:
+
+```bash
+GOBIN="$HOME/.local/bin" make install
+```
+
+Ensure the selected binary directory is on `PATH`. No package-manager or prebuilt-release installation is assumed here.
 
 ## Quick start
 
