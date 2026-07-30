@@ -143,6 +143,25 @@ func TestInitializeCanonicalizesSymlinkRoot(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsNoncanonicalConfiguredRepositoryPath(t *testing.T) {
+	repository := mustInitializeRepository(t, initGitRepository(t))
+	link := filepath.Join(t.TempDir(), "repository-link")
+	if err := os.Symlink(repository.Root, link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	opened, err := Open(link)
+	if !errors.Is(err, ErrRepositoryMissing) {
+		t.Fatalf("Open(symlink) error = %v, want ErrRepositoryMissing", err)
+	}
+	if opened != nil {
+		t.Fatalf("Open(symlink) repository = %#v after error, want nil", opened)
+	}
+	if !strings.Contains(err.Error(), "now resolves") {
+		t.Fatalf("Open(symlink) error is not actionable: %v", err)
+	}
+}
+
 func TestInitializeIsIdempotent(t *testing.T) {
 	root := initGitRepository(t)
 	first := mustInitializeRepository(t, root)
@@ -216,7 +235,7 @@ func TestOpenReportsMissingManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	opened, err := Open(root)
+	opened, err := Open(repository.Root)
 	if !errors.Is(err, ErrNotInitialized) {
 		t.Fatalf("Open() error = %v, want ErrNotInitialized", err)
 	}
@@ -237,7 +256,7 @@ func TestOpenReportsMissingStorageDirectories(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			opened, err := Open(root)
+			opened, err := Open(repository.Root)
 			if err == nil {
 				t.Fatalf("Open() succeeded with missing %s storage", storage)
 			}
