@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/images/susu-logo.png" alt="susu logo: a soot sprite carrying a terminal prompt" width="280">
+  <img src=".github/images/susu-logo.png" alt="susu" width="200">
 </p>
 
 # susu
