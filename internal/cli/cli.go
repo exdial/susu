@@ -139,7 +139,8 @@ func (c *CLI) runAdd(arguments []string) error {
 
 Start managing one or more files. Real directories are traversed recursively
 and stored as individual file entries; symlinks are never followed. Existing
-entries are skipped and never silently synchronized or overwritten.
+entries are skipped and never silently synchronized or overwritten. Inputs
+that overlap or contain susu's machine-local state directory are rejected.
 
 Options:
   --sensitive                 encrypt new files with the repository master key
@@ -255,6 +256,8 @@ func (c *CLI) runApply(arguments []string) error {
 Restore repository versions to confined local filesystem destinations. Sources
 are preflighted, each file is replaced atomically, current-platform exclusions
 are skipped, and sensitive entries share one password prompt per invocation.
+Destinations overlapping susu's machine-local state directory are rejected
+before source access or a password prompt.
 `)
 	if err := flags.Parse(arguments); err != nil {
 		return helpError(err)

@@ -32,6 +32,9 @@ var (
 	ErrUnsupportedPlatform = errors.New("unsupported platform value")
 	// ErrPasswordRequired indicates that an operation needs an interactive or injected password provider.
 	ErrPasswordRequired = errors.New("repository password is required")
+	// ErrProtectedLocalState indicates that a managed input or destination
+	// overlaps or aliases susu's machine-local binding, lock, or state staging directory.
+	ErrProtectedLocalState = errors.New("path overlaps susu local state")
 )
 
 // PasswordProvider returns a repository password. create is true only while
@@ -109,6 +112,11 @@ type candidate struct {
 	source   string
 }
 
+type localStateBoundary struct {
+	directory string
+	files     []fs.FileInfo
+}
+
 // Add starts managing regular files. Directories are recursively expanded into
 // individual entries; existing entries are skipped without overwriting storage.
 func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
@@ -125,7 +133,11 @@ func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
 	}
 	defer func() { _ = release() }()
 
-	candidates, err := s.collectCandidates(inputs, options.Sensitive)
+	stateBoundary, err := s.loadLocalStateBoundary()
+	if err != nil {
+		return AddResult{}, err
+	}
+	candidates, err := s.collectCandidates(inputs, options.Sensitive, stateBoundary)
 	if err != nil {
 		return AddResult{}, err
 	}
@@ -182,6 +194,10 @@ func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
 		defer cryptox.ZeroBytes(masterKey)
 	}
 
+	if err := preflightCandidates(newCandidates, stateBoundary); err != nil {
+		return AddResult{}, err
+	}
+
 	created := make([]string, 0, len(newCandidates))
 	rollback := func() {
 		for _, source := range created {
@@ -189,7 +205,7 @@ func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
 		}
 	}
 	for _, item := range newCandidates {
-		contents, openedMode, err := readCandidate(item)
+		contents, openedMode, err := readCandidate(item, stateBoundary)
 		if err != nil {
 			rollback()
 			return AddResult{}, fmt.Errorf("read %q: %w", item.absolute, err)
@@ -406,6 +422,19 @@ func (s *Service) Apply(passwordProvider PasswordProvider) (ApplyResult, error) 
 		applicable = append(applicable, entry)
 		hasSensitive = hasSensitive || entry.Sensitive
 	}
+	stateBoundary, err := s.loadLocalStateBoundary()
+	if err != nil {
+		return result, err
+	}
+	for _, entry := range applicable {
+		rootPath, relative, err := s.paths.SplitLogical(entry.Path)
+		if err != nil {
+			return result, fmt.Errorf("resolve destination %q: %w", entry.Path, err)
+		}
+		if err := stateBoundary.ensureOutside(filepath.Join(rootPath, relative)); err != nil {
+			return result, fmt.Errorf("apply destination %q: %w; remove the protected entry with 'susu rm <path>' before applying", entry.Path, err)
+		}
+	}
 
 	var masterKey []byte
 	if hasSensitive {
@@ -597,7 +626,7 @@ func (s *Service) openLocked() (*repository.Repository, manifest.Manifest, func(
 	return repo, current, combinedRelease, nil
 }
 
-func (s *Service) collectCandidates(inputs []string, sensitive bool) ([]candidate, error) {
+func (s *Service) collectCandidates(inputs []string, sensitive bool, stateBoundary *localStateBoundary) ([]candidate, error) {
 	byLogical := make(map[string]candidate)
 	bySource := make(map[string]string)
 	for _, input := range inputs {
@@ -610,6 +639,9 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool) ([]candidat
 			return nil, fmt.Errorf("resolve %q: %w", input, err)
 		}
 		absolute := filepath.Join(rootPath, relative)
+		if err := stateBoundary.ensureOutside(absolute); err != nil {
+			return nil, fmt.Errorf("add input %q: %w; choose a narrower input path", input, err)
+		}
 		root, err := os.OpenRoot(rootPath)
 		if err != nil {
 			return nil, fmt.Errorf("open path root for %q: %w", absolute, err)
@@ -653,7 +685,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool) ([]candidat
 				}
 				childRelative := filepath.FromSlash(filename)
 				childAbsolute := filepath.Join(rootPath, childRelative)
-				return s.addCandidate(byLogical, bySource, rootPath, childRelative, childAbsolute, entryInfo.Mode(), sensitive)
+				return s.addCandidate(byLogical, bySource, rootPath, childRelative, childAbsolute, entryInfo.Mode(), sensitive, stateBoundary)
 			})
 			closeErr := root.Close()
 			if err != nil {
@@ -671,7 +703,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool) ([]candidat
 		if err := root.Close(); err != nil {
 			return nil, fmt.Errorf("close path root for %q: %w", absolute, err)
 		}
-		if err := s.addCandidate(byLogical, bySource, rootPath, relative, absolute, info.Mode(), sensitive); err != nil {
+		if err := s.addCandidate(byLogical, bySource, rootPath, relative, absolute, info.Mode(), sensitive, stateBoundary); err != nil {
 			return nil, err
 		}
 	}
@@ -684,7 +716,10 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool) ([]candidat
 	return result, nil
 }
 
-func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[string]string, root, relative, absolute string, mode os.FileMode, sensitive bool) error {
+func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[string]string, root, relative, absolute string, mode os.FileMode, sensitive bool, stateBoundary *localStateBoundary) error {
+	if err := stateBoundary.ensureOutside(absolute); err != nil {
+		return fmt.Errorf("add discovered file %q: %w", absolute, err)
+	}
 	logical, err := s.paths.Normalize(absolute)
 	if err != nil {
 		return fmt.Errorf("normalize discovered file %q: %w", absolute, err)
@@ -743,22 +778,25 @@ func excluded(entry manifest.Entry, platform string) bool {
 	return false
 }
 
-func readCandidate(item candidate) ([]byte, os.FileMode, error) {
-	file, err := safefs.OpenRegular(item.root, item.relative)
+func preflightCandidates(candidates []candidate, stateBoundary *localStateBoundary) error {
+	for _, item := range candidates {
+		file, _, err := openCandidate(item, stateBoundary)
+		if err != nil {
+			return fmt.Errorf("preflight %q: %w", item.absolute, err)
+		}
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close preflight source %q: %w", item.absolute, err)
+		}
+	}
+	return nil
+}
+
+func readCandidate(item candidate, stateBoundary *localStateBoundary) ([]byte, os.FileMode, error) {
+	file, mode, err := openCandidate(item, stateBoundary)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, 0, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, 0, errors.New("path changed and is no longer a regular file")
-	}
-	if info.Size() > maxManagedFileSize {
-		return nil, 0, fmt.Errorf("file is %d bytes, v0.1 limit is %d", info.Size(), maxManagedFileSize)
-	}
 	contents, err := io.ReadAll(io.LimitReader(file, maxManagedFileSize+1))
 	if err != nil {
 		return nil, 0, err
@@ -766,7 +804,32 @@ func readCandidate(item candidate) ([]byte, os.FileMode, error) {
 	if int64(len(contents)) > maxManagedFileSize {
 		return nil, 0, fmt.Errorf("file exceeds v0.1 limit of %d bytes", maxManagedFileSize)
 	}
-	return contents, info.Mode(), nil
+	return contents, mode, nil
+}
+
+func openCandidate(item candidate, stateBoundary *localStateBoundary) (*os.File, os.FileMode, error) {
+	file, err := safefs.OpenRegular(item.root, item.relative)
+	if err != nil {
+		return nil, 0, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, 0, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, 0, errors.New("path changed and is no longer a regular file")
+	}
+	if err := stateBoundary.ensureFileOutside(item.absolute, info); err != nil {
+		_ = file.Close()
+		return nil, 0, err
+	}
+	if info.Size() > maxManagedFileSize {
+		_ = file.Close()
+		return nil, 0, fmt.Errorf("file is %d bytes, v0.1 limit is %d", info.Size(), maxManagedFileSize)
+	}
+	return file, info.Mode(), nil
 }
 
 func openStoredFile(repo *repository.Repository, source string) (*os.File, os.FileMode, error) {
@@ -906,6 +969,110 @@ func writeAll(writer io.Writer, contents []byte) error {
 		contents = contents[written:]
 	}
 	return nil
+}
+
+func (s *Service) loadLocalStateBoundary() (*localStateBoundary, error) {
+	directory, err := canonicalProspectivePath(s.state.Directory())
+	if err != nil {
+		return nil, fmt.Errorf("resolve local state directory %q: %w", s.state.Directory(), err)
+	}
+	boundary := &localStateBoundary{directory: directory}
+	if err := filepath.WalkDir(directory, func(filename string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := os.Stat(filename)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		boundary.files = append(boundary.files, info)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("inspect local state directory %q: %w", directory, err)
+	}
+	return boundary, nil
+}
+
+func (b *localStateBoundary) ensureOutside(candidate string) error {
+	overlaps, err := pathsOverlap(b.directory, candidate)
+	if err != nil {
+		return fmt.Errorf("verify local state boundary for %q: %w", candidate, err)
+	}
+	if !overlaps {
+		candidateInfo, statErr := os.Stat(candidate)
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("inspect candidate %q for local state aliases: %w", candidate, statErr)
+		}
+		if statErr == nil {
+			if err := b.ensureFileOutside(candidate, candidateInfo); err != nil {
+				return err
+			}
+		}
+	}
+	if overlaps {
+		return b.protectedError(candidate)
+	}
+	return nil
+}
+
+func (b *localStateBoundary) ensureFileOutside(candidate string, candidateInfo fs.FileInfo) error {
+	for _, protectedInfo := range b.files {
+		if os.SameFile(candidateInfo, protectedInfo) {
+			return b.protectedError(candidate)
+		}
+	}
+	return nil
+}
+
+func (b *localStateBoundary) protectedError(candidate string) error {
+	return fmt.Errorf("%w: %q overlaps or aliases local state directory %q", ErrProtectedLocalState, candidate, b.directory)
+}
+
+func pathsOverlap(first, second string) (bool, error) {
+	canonicalFirst, err := canonicalProspectivePath(first)
+	if err != nil {
+		return false, err
+	}
+	canonicalSecond, err := canonicalProspectivePath(second)
+	if err != nil {
+		return false, err
+	}
+	firstContainsSecond, err := pathWithin(canonicalFirst, canonicalSecond)
+	if err != nil {
+		return false, err
+	}
+	secondContainsFirst, err := pathWithin(canonicalSecond, canonicalFirst)
+	if err != nil {
+		return false, err
+	}
+	if firstContainsSecond || secondContainsFirst {
+		return true, nil
+	}
+	firstPhysicallyContainsSecond, err := physicalAncestorWithinIfExists(first, second)
+	if err != nil {
+		return false, err
+	}
+	secondPhysicallyContainsFirst, err := physicalAncestorWithinIfExists(second, first)
+	if err != nil {
+		return false, err
+	}
+	return firstPhysicallyContainsSecond || secondPhysicallyContainsFirst, nil
+}
+
+func physicalAncestorWithinIfExists(root, target string) (bool, error) {
+	if _, err := os.Stat(root); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return physicalAncestorWithin(root, target)
 }
 
 func (s *Service) ensureStateOutsideRepository(repositoryRoot string) error {

@@ -87,7 +87,7 @@ susu apply
 | `susu show <path>` | Print one stored file to stdout |
 | `susu apply` | Restore applicable files to local destinations |
 
-`add` captures a file only when it first becomes managed; it does not synchronize entries that already exist. Sensitive classification and platform exclusions are always explicit.
+`add` captures a file only when it first becomes managed; it does not synchronize entries that already exist. Sensitive classification and platform exclusions are always explicit. The machine-local `susu` state directory is reserved: `add` rejects inputs that overlap or contain it, and `apply` refuses manifest destinations that would overwrite it.
 
 ## A little lore
 
