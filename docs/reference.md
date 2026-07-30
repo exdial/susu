@@ -22,7 +22,9 @@ Use those exact values with `--exclude-platform`. Other operating systems and pl
 
 ## Build and install
 
-The module requires Go 1.26. The included `mise.toml` pins a compatible Go toolchain.
+Prebuilt `.tar.gz` archives are published on the [GitHub Releases](https://github.com/exdial/susu/releases) page for Linux and macOS on both `amd64` and `arm64`. Every release also publishes `checksums.txt`; each archive contains the `susu` binary, `README.md`, `LICENSE`, and `CHANGELOG.md`.
+
+To build from source, the module requires Go 1.26. The included `mise.toml` pins a compatible Go toolchain.
 
 From the repository root, build with mise:
 
@@ -51,7 +53,7 @@ When using the pinned mise toolchain, run `mise exec -- make install` instead. T
 GOBIN="$HOME/.local/bin" make install
 ```
 
-Ensure the selected binary directory is on `PATH`. No package-manager or prebuilt-release installation is assumed here.
+Ensure the selected binary directory is on `PATH`. Release maintainers should follow the [release procedure](releasing.md).
 
 ## Quick start
 

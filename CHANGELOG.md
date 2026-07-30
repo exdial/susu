@@ -14,6 +14,7 @@ Notable user-facing changes to `susu` are documented in this file. The README de
 - Recursive directory discovery with conservative symlink and special-file handling.
 - Preflighted, confined, atomic restoration of public and sensitive files.
 - Machine-local active-repository binding and repository-operation locking.
+- Automated GitHub releases with macOS/Linux archives and SHA-256 checksums.
 
 ### Known limitations
 

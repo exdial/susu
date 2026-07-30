@@ -4,6 +4,9 @@
 
 # susu
 
+[![Release](https://img.shields.io/github/v/release/exdial/susu)](https://github.com/exdial/susu/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 `susu` is a small Unix CLI for keeping selected dotfiles in a Git repository and restoring them on another machine. Public files are stored as ordinary snapshots; files added with `--sensitive` are encrypted before they enter the repository.
 
 `susu` supports macOS and Linux. It manages dotfile entries and their contents, while Git remains responsible for commits, remotes, synchronization, merges, and history.
@@ -16,9 +19,16 @@
 - Exclude entries explicitly on macOS or Linux.
 - Inspect stored files and restore them with predictable one-way commands.
 
-## Install from source
+## Installation
 
-Go 1.26 is required. From the repository root, install with the pinned mise toolchain:
+Prebuilt archives are published on the [GitHub Releases](https://github.com/exdial/susu/releases) page for:
+
+- Linux (`amd64`, `arm64`);
+- macOS / Darwin (`amd64`, `arm64`).
+
+Every release includes `checksums.txt` for artifact verification. All binaries are packaged as `.tar.gz` archives with `README.md`, `LICENSE`, and `CHANGELOG.md`.
+
+To install from source, Go 1.26 is required. From the repository root, install with the pinned mise toolchain:
 
 ```bash
 mise install
@@ -98,6 +108,7 @@ Small files. Small tool. One job.
 - [Security](docs/security.md) — encryption design, threat model, operational guidance, and audit status.
 - [Design and architecture](docs/design.md) — components, data flow, locking, and filesystem guarantees.
 - [Changelog](CHANGELOG.md) — version-specific changes.
+- [Releasing](docs/releasing.md) — maintainer workflow and published artifact matrix.
 
 ## License
 
