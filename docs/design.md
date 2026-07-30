@@ -79,7 +79,7 @@ The local binding is intentionally small and unversioned:
 
 The state decoder accepts only that field, rejects trailing data, requires a clean absolute path, and limits the file to 64 KiB. Writes use a `0700` state directory and a `0600` state file, with same-directory temporary-file replacement and file/directory synchronization.
 
-The entire private `susu` state directory is a protected local control root. `add` rejects an explicit input that is inside this directory, names the directory itself, or is an ancestor containing it. `apply` rejects every applicable manifest destination that overlaps it after platform filtering but before password prompting or repository-source access. Canonical, symlink, physical, case, and hard-linked aliases of protected state files exposed by the filesystem are included. `list`, `show`, and `rm` remain available for inspecting and removing legacy entries that predate this protection.
+The private `susu` state directory, active repository worktree, and Git common administrative directory are protected local control roots. `add` rejects an explicit input that is inside any root, names the root itself, or is an ancestor containing it. `apply` rejects every applicable manifest destination that overlaps one after platform filtering. Canonical, symlink, physical, and case aliases exposed by the filesystem are included; the small finite set of local-state files additionally receives opened-descriptor hard-link identity checks. For a linked worktree, the active worktree and shared Git common directory can be disjoint and are protected separately. `list`, `show`, and `rm` remain available for inspecting and removing legacy entries that predate this protection.
 
 ### Binding lifecycle
 
@@ -88,15 +88,16 @@ The entire private `susu` state directory is a protected local control root. `ad
 1. converts the argument to an absolute path and resolves symlinks;
 2. verifies that the result is a directory;
 3. runs `git rev-parse --show-toplevel` and requires the same canonical path;
-4. creates or validates `public/`, `encrypted/`, and `susu.json` under a repository lock;
-5. rejects a state location that is lexically, canonically, physically, or case-aliased inside the selected repository; and
-6. atomically records the canonical root under the state lock.
+4. resolves and retains Git's canonical common administrative directory for repository locking and control-root protection;
+5. creates or validates `public/`, `encrypted/`, and `susu.json` under the retained common-directory lock;
+6. requires the private state directory to remain disjoint from both the selected worktree and Git common directory; and
+7. atomically records the canonical root under the state lock.
 
 A symlink supplied directly to `init` is accepted when it resolves to the exact worktree root; the resolved target path is stored. Later commands reject that stored path if it disappears or begins resolving through a symlink. The binding does not persist a device/inode pair, repository identifier, or commit identity, so a different valid worktree recreated or mounted at the same canonical path is accepted. Repository provenance remains an external responsibility.
 
 At the `susu` layer, repository-dependent commands use only this binding. They do not search parent directories, inspect remotes, or define a `susu` environment variable that selects a repository. One state home therefore selects one active path, independent of the command's working directory. Inherited Git environment variables can still alter the Git subprocess interpretation described above.
 
-Before a command loads `susu.json`, it verifies that the bound path is still the exact Git worktree root, that both storage roots are real directories rather than symlinks, and that `susu.json` is a regular file. Missing scaffolding produces an error rather than implicit repair; `init` is the repair/initialization boundary.
+Before a command loads `susu.json`, it verifies that the bound path is still the exact Git worktree root, resolves and retains the same canonical Git common directory used by its lock, checks that both storage roots are real directories rather than symlinks, and requires `susu.json` to be a regular file. Missing scaffolding produces an error rather than implicit repair; `init` is the repair/initialization boundary.
 
 ## Repository layout
 
@@ -273,19 +274,19 @@ Manifest validity is structural. Loading the manifest does not prove that every 
 | FIFO, socket, device, or other non-regular object | Error | Skipped |
 | Empty directory | Produces no entry | Produces no entry |
 
-Candidate discovery completes before repository sources are written. After any required password callback, `add` performs a command-wide preflight that reopens and validates every new candidate before reading any candidate content or writing any repository source. This catches a protected hard link substituted during password entry without partially processing an earlier candidate. Each file is then reopened through the confined filesystem layer immediately before reading; the descriptor that is verified as regular is the descriptor read. Both passes compare the opened descriptor's filesystem identity with the protected state-file identities captured under the state lock. If a candidate is later replaced by a symlink, non-regular object, or hard link to protected local state, that candidate fails before its content is read or stored.
+Candidate discovery completes before repository sources are written. After any required password callback, `add` performs a command-wide preflight that reopens and validates every new candidate against all protected control roots before reading any candidate content or writing any repository source. This catches a protected path substituted during password entry without partially processing an earlier candidate. Each file is then reopened through the confined filesystem layer immediately before reading; the descriptor that is verified as regular is the descriptor read. Both passes repeat canonical/physical repository-root checks and compare the opened descriptor's filesystem identity with protected local-state file identities captured under the state lock. If a candidate is later redirected into a protected root, changed to a symlink or non-regular object, or replaced by a hard link to protected local state, that candidate fails before its content is read or stored.
 
 This is not a simultaneous snapshot of a directory tree. Files are read one at a time and are not locked against modification by other processes, so concurrent writers can change bytes while or between files being captured.
 
-Directory expansion has no general ignore mechanism. Before walking, `add` rejects any input whose canonical or physical path overlaps the active private `susu` state directory; this includes an ancestor directory that contains the state directory. A hard-linked protected state file discovered inside an otherwise unrelated tree is rejected during the walk. `add` still does not automatically exclude the active repository, its `.git` directory, or `susu` repository/destination staging files. Adding an ancestor that contains those unprotected locations can capture control data or recursively discover repository files created by earlier operations. Inputs should be scoped so they do not contain the repository or Git control locations.
+Directory expansion has no general ignore mechanism, but three runtime-specific roots are always reserved. Before walking, `add` rejects any input whose canonical or physical path overlaps the private state directory, active worktree, or Git common administrative directory; this includes an ancestor directory that contains one of them. A hard-linked protected state file discovered inside an otherwise unrelated tree is also rejected during the walk. Other unrelated staging or control paths are not inferred from names, so inputs should still be scoped narrowly.
 
 ## Command and data flows
 
 ```mermaid
 flowchart TB
     Manifest[Load and validate manifest] --> Filter[Filter platform exclusions]
-    Filter --> StateGuard[Reject local state destinations]
-    StateGuard --> Unlock[Unlock once if sensitive data is needed]
+    Filter --> ControlGuard[Reject protected control-root destinations]
+    ControlGuard --> Unlock[Unlock once if sensitive data is needed]
     Unlock --> Preflight[Open sources and authenticate ciphertext]
     Preflight --> Conflicts[Check concrete destination conflicts]
     Conflicts --> Replace[Stage, sync, and rename each destination]
@@ -305,14 +306,15 @@ For one invocation, `add`:
 
 1. validates and normalizes platform exclusions;
 2. opens the bound repository and loads the manifest under both locks;
-3. rejects inputs that overlap or contain the active private `susu` state directory;
+3. rejects inputs that overlap or contain the private state directory, active worktree, or Git common directory;
 4. discovers and sorts all regular-file candidates;
 5. separates already-managed identities from new identities;
 6. unlocks or initializes repository crypto once when at least one new sensitive entry exists;
-7. reads each new candidate through a no-follow descriptor, with a 512 MiB per-file limit;
-8. encrypts sensitive bytes in memory or retains public bytes;
-9. atomically installs each new repository source without replacing an existing path; and
-10. atomically replaces `susu.json` after all new sources are installed.
+7. revalidates every new candidate command-wide after the password callback;
+8. reads each new candidate through a separately revalidated no-follow descriptor, with a 512 MiB per-file limit;
+9. encrypts sensitive bytes in memory or retains public bytes;
+10. atomically installs each new repository source without replacing an existing path; and
+11. atomically replaces `susu.json` after all new sources are installed.
 
 Already-managed entries keep their original source bytes, sensitivity, and exclusions. A sensitive invocation containing only already-managed paths does not prompt for a password. Existing unreferenced data at a candidate's deterministic source path is treated as a collision and is not overwritten.
 
@@ -345,15 +347,16 @@ No plaintext temporary file is created by `show`. Standard output is the intenti
 `apply` operates on a logical-path-sorted view of the manifest:
 
 1. entries excluded for `runtime.GOOS` are recorded as skipped and removed from further processing;
-2. every applicable logical destination is resolved and rejected if it overlaps the active private `susu` state directory;
+2. every applicable logical destination is resolved and rejected if it overlaps the private state directory, active worktree, or Git common directory;
 3. the repository is unlocked once if any remaining entry is sensitive;
 4. every applicable source is opened through a stable no-follow descriptor;
 5. each sensitive source is read, authenticated, and decrypted in memory before any destination changes;
 6. public source size and mode are checked while its descriptor remains open;
-7. exact lexical and ancestor conflicts between concrete destination strings are rejected; and
-8. each prepared entry is staged and atomically renamed into place in logical-path order.
+7. exact lexical and ancestor conflicts between concrete destination strings are rejected;
+8. all applicable destinations are rechecked command-wide after source preflight; and
+9. each destination is checked once more immediately before it is staged and atomically renamed in logical-path order.
 
-Platform filtering and local-state destination protection occur before password requirements and source access. An excluded sensitive entry therefore does not cause a password prompt by itself, while an applicable legacy entry targeting local state fails before an unlock attempt.
+Platform filtering and the first protected-control-root destination check occur before password requirements and source access. An excluded sensitive entry therefore does not cause a password prompt by itself, while an applicable legacy entry already targeting a protected root fails before an unlock attempt. The later command-wide and per-destination checks catch namespace changes during the invocation before protected writes.
 
 Public sources are limited to 1 GiB by their preflight file size and then streamed from the retained descriptor during replacement. Sensitive serialized sources are read with the same 1 GiB limit. Decrypted sensitive plaintext remains in memory for the full preflight, with a 1 GiB aggregate limit across applicable sensitive entries.
 
@@ -371,7 +374,7 @@ For each destination, `apply`:
 
 A leaf symlink is replaced by the rename rather than followed. A symlink in any component below the logical HOME/XDG root causes an error. Existing regular files are replaced without a local-change comparison or backup.
 
-Confinement limits destinations to HOME/XDG roots and separately protects the active private `susu` state directory, including its binding, lock, and staging names. It does not impose a denylist for the active repository, `.git`, or other control files beneath the permitted roots. A corresponding manifest entry can still overwrite those unprotected locations during `apply`, so manifest provenance and destination review remain part of the trust boundary.
+Confinement limits destinations to HOME/XDG roots and separately protects the private `susu` state directory, active repository worktree, and Git common administrative directory. A corresponding applicable manifest entry cannot write into those roots. Other machine control paths remain outside this runtime-specific boundary, and public sources and manifest policy are still unauthenticated, so manifest provenance and destination review remain part of the trust boundary.
 
 ## Transaction, atomicity, and failure behavior
 
@@ -404,7 +407,7 @@ A normal staging failure removes the temporary destination file. A crash after s
 Two exclusive advisory `flock` locks cover different identities:
 
 1. The state lock beside `state.json` serializes commands that share one local binding. A repository-dependent command initially resolves the binding, acquires this lock, reloads the binding under the lock, and validates it again. This prevents an `init` race from making a command act on a stale selection.
-2. The repository lock at `<git-common-dir>/susu.lock` serializes every manifest and source read or mutation for that Git repository. Using Git's common administrative directory makes linked worktrees and different XDG state homes converge on the same lock.
+2. The repository lock at `<git-common-dir>/susu.lock` serializes every manifest and source read or mutation for that Git repository. The canonical common directory is resolved once when the repository object is opened, then reused for both lock placement and protected-root policy. Using Git's common administrative directory makes linked worktrees and different XDG state homes converge on the same lock.
 
 Repository-dependent commands acquire the state lock before the repository lock and hold both through manifest/source work. This includes password prompting, `show` output, and destination writes during `apply`, so another cooperating `susu` process waits for the invocation to finish. `init` scaffolds under the repository lock and updates the binding separately under the state lock, avoiding a reversed nested lock order.
 
@@ -436,7 +439,7 @@ These protections constrain filesystem traversal; they do not make same-user mut
 - `git rev-parse --show-toplevel`, which validates the worktree root as interpreted by Git; and
 - `git rev-parse --git-common-dir`, which locates the repository-wide lock directory.
 
-Both commands use `git` from `PATH` and inherit the caller's environment. Repository-selection variables understood by Git can redirect either result; `susu` does not clear them.
+Both commands use `git` from `PATH` and inherit the caller's environment. Repository-selection variables understood by Git can redirect either result; `susu` does not clear them. The canonical common-directory result is retained for the lifetime of that repository object so locking and app-level boundary checks use the same interpretation without rerunning Git.
 
 It does not run `git init`, clone, add, commit, status, diff, push, pull, fetch, merge, checkout, conflict resolution, signing, or history rewriting. Bare repositories are not usable because operations require a worktree root and ordinary storage files.
 
@@ -458,7 +461,7 @@ The implemented model has these deliberate or practical limits:
 - Existing entries cannot be refreshed through `add`; it is membership capture, not synchronization.
 - Restore overwrites applicable destinations without conflict detection against local contents, backups, or a command-wide rollback.
 - Entries represent regular files only. Symlinks, special files, empty directories, and directory metadata are not preserved.
-- Recursive input and destination application reject canonical or physical overlap with the active private `susu` state directory. There is no general ignore/denylist for repository, Git, or staging paths beneath the permitted roots.
+- Recursive input and destination application reject canonical or physical overlap with the private state directory, active worktree, and Git common directory. The implementation does not perform a global reverse-inode search for arbitrary regular-file hard links into repository or Git trees; current destination replacement installs a new inode rather than writing through an existing hard link.
 - Destination conflict detection is lexical; case- or Unicode-normalization-equivalent names can alias on some filesystems.
 - Public mode portability is limited to non-executable versus executable; sensitive destinations are always `0600`.
 - `add` reads one complete input file into memory. Sensitive `show` reads and decrypts one complete envelope in memory. `apply` retains all applicable sensitive plaintext through preflight.

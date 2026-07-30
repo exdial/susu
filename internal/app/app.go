@@ -35,6 +35,9 @@ var (
 	// ErrProtectedLocalState indicates that a managed input or destination
 	// overlaps or aliases susu's machine-local binding, lock, or state staging directory.
 	ErrProtectedLocalState = errors.New("path overlaps susu local state")
+	// ErrProtectedRepository indicates that a managed input or destination
+	// overlaps the active worktree or its Git common administrative directory.
+	ErrProtectedRepository = errors.New("path overlaps active susu repository")
 )
 
 // PasswordProvider returns a repository password. create is true only while
@@ -76,7 +79,7 @@ func (s *Service) Init(input string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := s.ensureStateOutsideRepository(repo.Root); err != nil {
+	if err := s.ensureStateOutsideRepository(repo); err != nil {
 		return "", err
 	}
 	release, err := s.state.Lock()
@@ -117,6 +120,21 @@ type localStateBoundary struct {
 	files     []fs.FileInfo
 }
 
+type repositoryProtectedRoot struct {
+	path  string
+	label string
+	info  fs.FileInfo
+}
+
+type repositoryBoundary struct {
+	roots []repositoryProtectedRoot
+}
+
+type controlBoundary struct {
+	localState *localStateBoundary
+	repository *repositoryBoundary
+}
+
 // Add starts managing regular files. Directories are recursively expanded into
 // individual entries; existing entries are skipped without overwriting storage.
 func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
@@ -133,11 +151,11 @@ func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
 	}
 	defer func() { _ = release() }()
 
-	stateBoundary, err := s.loadLocalStateBoundary()
+	boundary, err := s.loadControlBoundary(repo)
 	if err != nil {
 		return AddResult{}, err
 	}
-	candidates, err := s.collectCandidates(inputs, options.Sensitive, stateBoundary)
+	candidates, err := s.collectCandidates(inputs, options.Sensitive, boundary)
 	if err != nil {
 		return AddResult{}, err
 	}
@@ -194,7 +212,7 @@ func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
 		defer cryptox.ZeroBytes(masterKey)
 	}
 
-	if err := preflightCandidates(newCandidates, stateBoundary); err != nil {
+	if err := preflightCandidates(newCandidates, boundary); err != nil {
 		return AddResult{}, err
 	}
 
@@ -205,7 +223,7 @@ func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
 		}
 	}
 	for _, item := range newCandidates {
-		contents, openedMode, err := readCandidate(item, stateBoundary)
+		contents, openedMode, err := readCandidate(item, boundary)
 		if err != nil {
 			rollback()
 			return AddResult{}, fmt.Errorf("read %q: %w", item.absolute, err)
@@ -399,6 +417,19 @@ type ApplyResult struct {
 	Skipped []string
 }
 
+func (s *Service) ensureApplyDestinationsOutside(entries []manifest.Entry, boundary *controlBoundary) error {
+	for _, entry := range entries {
+		rootPath, relative, err := s.paths.SplitLogical(entry.Path)
+		if err != nil {
+			return fmt.Errorf("resolve destination %q: %w", entry.Path, err)
+		}
+		if err := boundary.ensureOutside(filepath.Join(rootPath, relative)); err != nil {
+			return fmt.Errorf("apply destination %q: %w; remove the protected entry with 'susu rm <path>' before applying", entry.Path, err)
+		}
+	}
+	return nil
+}
+
 // Apply restores repository versions to their runtime destinations. It first
 // preflights every applicable source and authenticates every ciphertext, so
 // repository corruption cannot cause a half-applied invocation.
@@ -422,18 +453,12 @@ func (s *Service) Apply(passwordProvider PasswordProvider) (ApplyResult, error) 
 		applicable = append(applicable, entry)
 		hasSensitive = hasSensitive || entry.Sensitive
 	}
-	stateBoundary, err := s.loadLocalStateBoundary()
+	boundary, err := s.loadControlBoundary(repo)
 	if err != nil {
 		return result, err
 	}
-	for _, entry := range applicable {
-		rootPath, relative, err := s.paths.SplitLogical(entry.Path)
-		if err != nil {
-			return result, fmt.Errorf("resolve destination %q: %w", entry.Path, err)
-		}
-		if err := stateBoundary.ensureOutside(filepath.Join(rootPath, relative)); err != nil {
-			return result, fmt.Errorf("apply destination %q: %w; remove the protected entry with 'susu rm <path>' before applying", entry.Path, err)
-		}
+	if err := s.ensureApplyDestinationsOutside(applicable, boundary); err != nil {
+		return result, err
 	}
 
 	var masterKey []byte
@@ -548,8 +573,15 @@ func (s *Service) Apply(passwordProvider PasswordProvider) (ApplyResult, error) 
 		}
 	}
 
+	if err := s.ensureApplyDestinationsOutside(applicable, boundary); err != nil {
+		return result, err
+	}
+
 	for index := range prepared {
 		item := &prepared[index]
+		if err := boundary.ensureOutside(filepath.Join(item.root, item.relative)); err != nil {
+			return result, fmt.Errorf("apply destination %q after restoring %d file(s): %w; remove the protected entry with 'susu rm <path>' before applying", item.entry.Path, len(result.Applied), err)
+		}
 		write := func(writer io.Writer) error {
 			if item.entry.Sensitive {
 				return writeAll(writer, item.contents)
@@ -587,7 +619,7 @@ func (s *Service) openLocked() (*repository.Repository, manifest.Manifest, func(
 	if err != nil {
 		return nil, manifest.Manifest{}, nil, err
 	}
-	if err := s.ensureStateOutsideRepository(configuredRepository.Root); err != nil {
+	if err := s.ensureStateOutsideRepository(configuredRepository); err != nil {
 		return nil, manifest.Manifest{}, nil, err
 	}
 	release, err := s.state.Lock()
@@ -605,7 +637,7 @@ func (s *Service) openLocked() (*repository.Repository, manifest.Manifest, func(
 		_ = release()
 		return nil, manifest.Manifest{}, nil, err
 	}
-	if err := s.ensureStateOutsideRepository(repo.Root); err != nil {
+	if err := s.ensureStateOutsideRepository(repo); err != nil {
 		_ = release()
 		return nil, manifest.Manifest{}, nil, err
 	}
@@ -626,7 +658,7 @@ func (s *Service) openLocked() (*repository.Repository, manifest.Manifest, func(
 	return repo, current, combinedRelease, nil
 }
 
-func (s *Service) collectCandidates(inputs []string, sensitive bool, stateBoundary *localStateBoundary) ([]candidate, error) {
+func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *controlBoundary) ([]candidate, error) {
 	byLogical := make(map[string]candidate)
 	bySource := make(map[string]string)
 	for _, input := range inputs {
@@ -639,7 +671,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, stateBounda
 			return nil, fmt.Errorf("resolve %q: %w", input, err)
 		}
 		absolute := filepath.Join(rootPath, relative)
-		if err := stateBoundary.ensureOutside(absolute); err != nil {
+		if err := boundary.ensureOutside(absolute); err != nil {
 			return nil, fmt.Errorf("add input %q: %w; choose a narrower input path", input, err)
 		}
 		root, err := os.OpenRoot(rootPath)
@@ -685,7 +717,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, stateBounda
 				}
 				childRelative := filepath.FromSlash(filename)
 				childAbsolute := filepath.Join(rootPath, childRelative)
-				return s.addCandidate(byLogical, bySource, rootPath, childRelative, childAbsolute, entryInfo.Mode(), sensitive, stateBoundary)
+				return s.addCandidate(byLogical, bySource, rootPath, childRelative, childAbsolute, entryInfo.Mode(), sensitive, boundary)
 			})
 			closeErr := root.Close()
 			if err != nil {
@@ -703,7 +735,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, stateBounda
 		if err := root.Close(); err != nil {
 			return nil, fmt.Errorf("close path root for %q: %w", absolute, err)
 		}
-		if err := s.addCandidate(byLogical, bySource, rootPath, relative, absolute, info.Mode(), sensitive, stateBoundary); err != nil {
+		if err := s.addCandidate(byLogical, bySource, rootPath, relative, absolute, info.Mode(), sensitive, boundary); err != nil {
 			return nil, err
 		}
 	}
@@ -716,8 +748,8 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, stateBounda
 	return result, nil
 }
 
-func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[string]string, root, relative, absolute string, mode os.FileMode, sensitive bool, stateBoundary *localStateBoundary) error {
-	if err := stateBoundary.ensureOutside(absolute); err != nil {
+func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[string]string, root, relative, absolute string, mode os.FileMode, sensitive bool, boundary *controlBoundary) error {
+	if err := boundary.ensureOutside(absolute); err != nil {
 		return fmt.Errorf("add discovered file %q: %w", absolute, err)
 	}
 	logical, err := s.paths.Normalize(absolute)
@@ -778,9 +810,9 @@ func excluded(entry manifest.Entry, platform string) bool {
 	return false
 }
 
-func preflightCandidates(candidates []candidate, stateBoundary *localStateBoundary) error {
+func preflightCandidates(candidates []candidate, boundary *controlBoundary) error {
 	for _, item := range candidates {
-		file, _, err := openCandidate(item, stateBoundary)
+		file, _, err := openCandidate(item, boundary)
 		if err != nil {
 			return fmt.Errorf("preflight %q: %w", item.absolute, err)
 		}
@@ -791,8 +823,8 @@ func preflightCandidates(candidates []candidate, stateBoundary *localStateBounda
 	return nil
 }
 
-func readCandidate(item candidate, stateBoundary *localStateBoundary) ([]byte, os.FileMode, error) {
-	file, mode, err := openCandidate(item, stateBoundary)
+func readCandidate(item candidate, boundary *controlBoundary) ([]byte, os.FileMode, error) {
+	file, mode, err := openCandidate(item, boundary)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -807,7 +839,10 @@ func readCandidate(item candidate, stateBoundary *localStateBoundary) ([]byte, o
 	return contents, mode, nil
 }
 
-func openCandidate(item candidate, stateBoundary *localStateBoundary) (*os.File, os.FileMode, error) {
+func openCandidate(item candidate, boundary *controlBoundary) (*os.File, os.FileMode, error) {
+	if err := boundary.ensureOutside(item.absolute); err != nil {
+		return nil, 0, err
+	}
 	file, err := safefs.OpenRegular(item.root, item.relative)
 	if err != nil {
 		return nil, 0, err
@@ -821,7 +856,7 @@ func openCandidate(item candidate, stateBoundary *localStateBoundary) (*os.File,
 		_ = file.Close()
 		return nil, 0, errors.New("path changed and is no longer a regular file")
 	}
-	if err := stateBoundary.ensureFileOutside(item.absolute, info); err != nil {
+	if err := boundary.ensureOpenedFileOutside(item.absolute, info); err != nil {
 		_ = file.Close()
 		return nil, 0, err
 	}
@@ -971,6 +1006,81 @@ func writeAll(writer io.Writer, contents []byte) error {
 	return nil
 }
 
+func (s *Service) loadControlBoundary(repo *repository.Repository) (*controlBoundary, error) {
+	stateBoundary, err := s.loadLocalStateBoundary()
+	if err != nil {
+		return nil, err
+	}
+	repositoryBoundary, err := loadRepositoryBoundary(repo)
+	if err != nil {
+		return nil, err
+	}
+	return &controlBoundary{localState: stateBoundary, repository: repositoryBoundary}, nil
+}
+
+func loadRepositoryBoundary(repo *repository.Repository) (*repositoryBoundary, error) {
+	if repo == nil {
+		return nil, errors.New("repository is nil")
+	}
+	locations := []struct {
+		path  string
+		label string
+	}{
+		{path: repo.Root, label: "repository worktree"},
+		{path: repo.GitCommonDirectory(), label: "Git common directory"},
+	}
+	boundary := &repositoryBoundary{roots: make([]repositoryProtectedRoot, 0, len(locations))}
+	for _, location := range locations {
+		canonical, err := canonicalProspectivePath(location.path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve active %s %q: %w", location.label, location.path, err)
+		}
+		info, err := os.Stat(canonical)
+		if err != nil {
+			return nil, fmt.Errorf("inspect active %s %q: %w", location.label, canonical, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("active %s %q is not a directory", location.label, canonical)
+		}
+		boundary.roots = append(boundary.roots, repositoryProtectedRoot{path: canonical, label: location.label, info: info})
+	}
+	return boundary, nil
+}
+
+func (b *controlBoundary) ensureOutside(candidate string) error {
+	if err := b.localState.ensureOutside(candidate); err != nil {
+		return err
+	}
+	return b.repository.ensureOutside(candidate)
+}
+
+func (b *controlBoundary) ensureOpenedFileOutside(candidate string, candidateInfo fs.FileInfo) error {
+	if err := b.localState.ensureFileOutside(candidate, candidateInfo); err != nil {
+		return err
+	}
+	return b.repository.ensureOutside(candidate)
+}
+
+func (b *repositoryBoundary) ensureOutside(candidate string) error {
+	for _, root := range b.roots {
+		currentInfo, err := os.Stat(root.path)
+		if err != nil {
+			return fmt.Errorf("verify active %s %q: %w", root.label, root.path, err)
+		}
+		if !currentInfo.IsDir() || !os.SameFile(currentInfo, root.info) {
+			return fmt.Errorf("%w: active %s %q changed while the command was running", ErrProtectedRepository, root.label, root.path)
+		}
+		overlaps, err := pathsOverlap(root.path, candidate)
+		if err != nil {
+			return fmt.Errorf("verify active %s boundary for %q: %w", root.label, candidate, err)
+		}
+		if overlaps {
+			return fmt.Errorf("%w: %q overlaps or aliases active %s %q", ErrProtectedRepository, candidate, root.label, root.path)
+		}
+	}
+	return nil
+}
+
 func (s *Service) loadLocalStateBoundary() (*localStateBoundary, error) {
 	directory, err := canonicalProspectivePath(s.state.Directory())
 	if err != nil {
@@ -1075,21 +1185,26 @@ func physicalAncestorWithinIfExists(root, target string) (bool, error) {
 	return physicalAncestorWithin(root, target)
 }
 
-func (s *Service) ensureStateOutsideRepository(repositoryRoot string) error {
-	statePath, err := canonicalProspectivePath(s.state.Path())
+func (s *Service) ensureStateOutsideRepository(repo *repository.Repository) error {
+	stateDirectory, err := canonicalProspectivePath(s.state.Directory())
 	if err != nil {
-		return fmt.Errorf("resolve local state path %q: %w", s.state.Path(), err)
+		return fmt.Errorf("resolve local state directory %q: %w", s.state.Directory(), err)
 	}
-	inside, err := pathWithin(repositoryRoot, statePath)
-	if err != nil {
-		return err
+	locations := []struct {
+		path  string
+		label string
+	}{
+		{path: repo.Root, label: "repository worktree"},
+		{path: repo.GitCommonDirectory(), label: "Git common directory"},
 	}
-	physicalInside, err := physicalAncestorWithin(repositoryRoot, s.state.Path())
-	if err != nil {
-		return fmt.Errorf("verify local state filesystem location: %w", err)
-	}
-	if inside || physicalInside {
-		return fmt.Errorf("local state path %q must not be stored inside repository %q; choose an XDG_STATE_HOME outside the repository", statePath, repositoryRoot)
+	for _, location := range locations {
+		overlaps, err := pathsOverlap(stateDirectory, location.path)
+		if err != nil {
+			return fmt.Errorf("verify local state against active %s: %w", location.label, err)
+		}
+		if overlaps {
+			return fmt.Errorf("local state directory %q must not be stored inside or otherwise overlap active %s %q; choose an XDG_STATE_HOME outside repository and Git metadata", stateDirectory, location.label, location.path)
+		}
 	}
 	return nil
 }

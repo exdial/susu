@@ -564,6 +564,214 @@ func TestAddRechecksHardLinkedLocalStateFileAfterPassword(t *testing.T) {
 	}
 }
 
+func TestAddRejectsRepositoryPathsBeforePasswordOrMutation(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{repositoryUnderHome: true, customXDG: true})
+	const stagingSuffix = "0123456789abcdef01234567"
+	manifestPath := filepath.Join(environment.repository, manifest.Filename)
+	repositoryLock := filepath.Join(environment.gitCommonDirectory, "susu.lock")
+	stagingFiles := map[string][]byte{
+		filepath.Join(environment.repository, ".susu-123456789.tmp"):                       []byte("manifest staging sentinel\n"),
+		filepath.Join(environment.repository, "public", ".susu-add-"+stagingSuffix+".tmp"): []byte("add staging sentinel\n"),
+		filepath.Join(environment.repository, ".susu-apply-"+stagingSuffix+".tmp"):         []byte("apply staging sentinel\n"),
+	}
+	for filename, contents := range stagingFiles {
+		mustWriteFile(t, filename, contents, 0o600)
+	}
+	if _, err := os.Stat(repositoryLock); err != nil {
+		t.Fatalf("repository lock does not exist: %v", err)
+	}
+	manifestBefore := mustReadFile(t, manifestPath)
+	encryptedBefore := mustReadDirectoryNames(t, filepath.Join(environment.repository, "encrypted"))
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "exact worktree", input: environment.repositoryInput},
+		{name: "manifest", input: manifestPath},
+		{name: "public storage", input: filepath.Join(environment.repository, "public")},
+		{name: "encrypted storage", input: filepath.Join(environment.repository, "encrypted")},
+		{name: "Git directory", input: environment.gitCommonDirectory},
+		{name: "repository lock", input: repositoryLock},
+		{name: "manifest staging file", input: filepath.Join(environment.repository, ".susu-123456789.tmp")},
+		{name: "add staging file", input: filepath.Join(environment.repository, "public", ".susu-add-"+stagingSuffix+".tmp")},
+		{name: "apply staging file", input: filepath.Join(environment.repository, ".susu-apply-"+stagingSuffix+".tmp")},
+		{name: "representable ancestor", input: filepath.Dir(environment.repository)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var passwordCalls []bool
+			result, err := environment.service.Add([]string{test.input}, app.AddOptions{
+				Sensitive: true,
+				Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+			})
+			if !errors.Is(err, app.ErrProtectedRepository) {
+				t.Fatalf("Add(%q) error = %v, want ErrProtectedRepository", test.input, err)
+			}
+			if !strings.Contains(err.Error(), "choose a narrower input path") {
+				t.Fatalf("Add(%q) error is not actionable: %v", test.input, err)
+			}
+			assertStrings(t, result.Added, nil)
+			assertStrings(t, result.AlreadyManaged, nil)
+			assertPasswordCalls(t, passwordCalls, nil)
+			assertFileContents(t, manifestPath, manifestBefore)
+			assertStrings(t, mustReadDirectoryNames(t, filepath.Join(environment.repository, "encrypted")), encryptedBefore)
+			for filename, contents := range stagingFiles {
+				assertFileContents(t, filename, contents)
+			}
+		})
+	}
+}
+
+func TestAddAllowsSiblingOutsideRepository(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{repositoryUnderHome: true, customXDG: true})
+	contents := []byte("nearby repository sibling\n")
+	destination := mustWriteFile(t, filepath.Join(environment.repository+"-sibling", "config"), contents, 0o644)
+	entry := mustEntryForDestination(t, environment, destination, false)
+
+	result, err := environment.service.Add([]string{destination}, app.AddOptions{})
+	if err != nil {
+		t.Fatalf("Add(repository sibling) error = %v", err)
+	}
+	assertStrings(t, result.Added, []string{entry.Path})
+	assertFileContents(t, filepath.Join(environment.repository, filepath.FromSlash(entry.Source)), contents)
+}
+
+func TestAddRejectsRepositorySymlinkAndCaseAliases(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{repositoryUnderHome: true, customXDG: true})
+	manifestPath := filepath.Join(environment.repository, manifest.Filename)
+	manifestBefore := mustReadFile(t, manifestPath)
+	encryptedBefore := mustReadDirectoryNames(t, filepath.Join(environment.repository, "encrypted"))
+
+	t.Run("symlink alias", func(t *testing.T) {
+		alias := filepath.Join(environment.home, "active-repository-link")
+		if err := os.Symlink(environment.repository, alias); err != nil {
+			t.Skipf("symlinks are unavailable: %v", err)
+		}
+		var passwordCalls []bool
+		result, err := environment.service.Add([]string{alias}, app.AddOptions{
+			Sensitive: true,
+			Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+		})
+		if !errors.Is(err, app.ErrProtectedRepository) {
+			t.Fatalf("Add(repository symlink alias) error = %v, want ErrProtectedRepository", err)
+		}
+		assertStrings(t, result.Added, nil)
+		assertPasswordCalls(t, passwordCalls, nil)
+		assertFileContents(t, manifestPath, manifestBefore)
+		assertStrings(t, mustReadDirectoryNames(t, filepath.Join(environment.repository, "encrypted")), encryptedBefore)
+	})
+
+	t.Run("case alias", func(t *testing.T) {
+		alias := filepath.Join(filepath.Dir(environment.repository), strings.ToUpper(filepath.Base(environment.repository)))
+		repositoryInfo, err := os.Stat(environment.repository)
+		if err != nil {
+			t.Fatal(err)
+		}
+		aliasInfo, err := os.Stat(alias)
+		if err != nil || !os.SameFile(repositoryInfo, aliasInfo) {
+			t.Skip("test filesystem is case-sensitive")
+		}
+
+		var passwordCalls []bool
+		result, err := environment.service.Add([]string{alias}, app.AddOptions{
+			Sensitive: true,
+			Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+		})
+		if !errors.Is(err, app.ErrProtectedRepository) {
+			t.Fatalf("Add(repository case alias) error = %v, want ErrProtectedRepository", err)
+		}
+		assertStrings(t, result.Added, nil)
+		assertPasswordCalls(t, passwordCalls, nil)
+		assertFileContents(t, manifestPath, manifestBefore)
+		assertStrings(t, mustReadDirectoryNames(t, filepath.Join(environment.repository, "encrypted")), encryptedBefore)
+	})
+}
+
+func TestAddRechecksRepositorySymlinkAfterPasswordBeforeMutation(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{repositoryUnderHome: true, customXDG: true})
+	earlier := mustWriteFile(
+		t,
+		filepath.Join(environment.home, "a-preflight-before", "nested", "ordinary"),
+		[]byte("ordinary earlier candidate\n"),
+		0o600,
+	)
+	candidate := mustWriteFile(
+		t,
+		filepath.Join(environment.home, "z-late-repository-alias"),
+		[]byte("ordinary late candidate\n"),
+		0o600,
+	)
+	manifestPath := filepath.Join(environment.repository, manifest.Filename)
+	manifestBefore := mustReadFile(t, manifestPath)
+	encryptedBefore := mustReadDirectoryNames(t, filepath.Join(environment.repository, "encrypted"))
+
+	var passwordCalls []bool
+	passwordProvider := func(create bool) ([]byte, error) {
+		passwordCalls = append(passwordCalls, create)
+		if err := os.Remove(candidate); err != nil {
+			return nil, err
+		}
+		if err := os.Symlink(environment.repository, candidate); err != nil {
+			return nil, err
+		}
+		return []byte(testPassword), nil
+	}
+
+	result, err := environment.service.Add(
+		[]string{earlier, candidate},
+		app.AddOptions{Sensitive: true, Password: passwordProvider},
+	)
+	if !errors.Is(err, app.ErrProtectedRepository) {
+		t.Fatalf("Add(late repository symlink) error = %v, want ErrProtectedRepository", err)
+	}
+	assertStrings(t, result.Added, nil)
+	assertStrings(t, result.AlreadyManaged, nil)
+	assertPasswordCalls(t, passwordCalls, []bool{true})
+	assertPathDoesNotExist(t, filepath.Join(environment.repository, "encrypted", "a-preflight-before"))
+	assertPathDoesNotExist(t, repositorySource(t, environment, "~/z-late-repository-alias", true))
+	assertFileContents(t, manifestPath, manifestBefore)
+	assertStrings(t, mustReadDirectoryNames(t, filepath.Join(environment.repository, "encrypted")), encryptedBefore)
+	assertFileContents(t, earlier, []byte("ordinary earlier candidate\n"))
+	if info, statErr := os.Lstat(candidate); statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("late candidate was not left as a repository symlink: mode = %v, error = %v", info, statErr)
+	}
+}
+
+func TestAddRejectsLinkedWorktreeGitCommonPaths(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{linkedWorktree: true, customXDG: true})
+	manifestPath := filepath.Join(environment.repository, manifest.Filename)
+	manifestBefore := mustReadFile(t, manifestPath)
+	encryptedBefore := mustReadDirectoryNames(t, filepath.Join(environment.repository, "encrypted"))
+	repositoryLock := filepath.Join(environment.gitCommonDirectory, "susu.lock")
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "Git common root", input: environment.gitCommonDirectory},
+		{name: "repository lock", input: repositoryLock},
+		{name: "Git common ancestor", input: filepath.Dir(environment.gitCommonDirectory)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var passwordCalls []bool
+			result, err := environment.service.Add([]string{test.input}, app.AddOptions{
+				Sensitive: true,
+				Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+			})
+			if !errors.Is(err, app.ErrProtectedRepository) {
+				t.Fatalf("Add(%q) error = %v, want ErrProtectedRepository", test.input, err)
+			}
+			assertStrings(t, result.Added, nil)
+			assertPasswordCalls(t, passwordCalls, nil)
+			assertFileContents(t, manifestPath, manifestBefore)
+			assertStrings(t, mustReadDirectoryNames(t, filepath.Join(environment.repository, "encrypted")), encryptedBefore)
+		})
+	}
+}
+
 func TestListOrdersAndFormatsPlatformExclusions(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{})
 	zeta := mustWriteFile(t, filepath.Join(environment.home, ".zeta"), []byte("zeta\n"), 0o644)
@@ -1238,6 +1446,312 @@ func TestRemoveCleansLegacyLocalStateEntryWithoutChangingBinding(t *testing.T) {
 	assertStrings(t, managedPaths(t, environment.service), nil)
 }
 
+func TestApplyRejectsRepositoryDestinationsBeforePasswordSourceOrMutation(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{repositoryUnderHome: true, customXDG: true})
+	storedEarlier := []byte("stored earlier destination\n")
+	localEarlier := []byte("local earlier destination must remain\n")
+	earlierDestination := mustWriteFile(t, filepath.Join(environment.home, ".a-apply-before"), storedEarlier, 0o644)
+	if _, err := environment.service.Add([]string{earlierDestination}, app.AddOptions{}); err != nil {
+		t.Fatalf("Add(earlier public) error = %v", err)
+	}
+	cryptoSeed := mustWriteFile(t, filepath.Join(environment.home, ".crypto-seed"), []byte("crypto seed\n"), 0o600)
+	if _, err := environment.service.Add([]string{cryptoSeed}, app.AddOptions{
+		Sensitive: true,
+		Password:  recordingPasswordProvider(testPassword, nil),
+	}); err != nil {
+		t.Fatalf("Add(crypto seed) error = %v", err)
+	}
+	base := mustLoadManifest(t, environment)
+	if base.Crypto == nil {
+		t.Fatal("crypto seed did not initialize repository metadata")
+	}
+	earlierEntry := mustFindEntry(t, base, "~/.a-apply-before")
+
+	const stagingSuffix = "0123456789abcdef01234567"
+	manifestPath := filepath.Join(environment.repository, manifest.Filename)
+	repositoryLock := filepath.Join(environment.gitCommonDirectory, "susu.lock")
+	controlFiles := map[string][]byte{
+		repositoryLock: []byte("repository lock sentinel\n"),
+		filepath.Join(environment.repository, ".susu-123456789.tmp"):                       []byte("manifest staging sentinel\n"),
+		filepath.Join(environment.repository, "public", ".susu-add-"+stagingSuffix+".tmp"): []byte("add staging sentinel\n"),
+		filepath.Join(environment.repository, ".susu-apply-"+stagingSuffix+".tmp"):         []byte("apply staging sentinel\n"),
+	}
+	for filename, contents := range controlFiles {
+		mustWriteFile(t, filename, contents, 0o600)
+	}
+
+	tests := []struct {
+		name        string
+		destination string
+	}{
+		{name: "exact worktree", destination: environment.repositoryInput},
+		{name: "manifest", destination: manifestPath},
+		{name: "public storage", destination: filepath.Join(environment.repository, "public")},
+		{name: "encrypted storage", destination: filepath.Join(environment.repository, "encrypted")},
+		{name: "Git directory", destination: environment.gitCommonDirectory},
+		{name: "repository lock", destination: repositoryLock},
+		{name: "manifest staging file", destination: filepath.Join(environment.repository, ".susu-123456789.tmp")},
+		{name: "add staging file", destination: filepath.Join(environment.repository, "public", ".susu-add-"+stagingSuffix+".tmp")},
+		{name: "apply staging file", destination: filepath.Join(environment.repository, ".susu-apply-"+stagingSuffix+".tmp")},
+		{name: "representable ancestor", destination: filepath.Dir(environment.repository)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mustWriteFile(t, earlierDestination, localEarlier, 0o644)
+			protectedEntry := mustEntryForDestination(t, environment, test.destination, true)
+			current := manifest.New()
+			current.Crypto = base.Crypto
+			current.Entries = []manifest.Entry{earlierEntry, protectedEntry}
+			mustSaveManifest(t, environment, current)
+			protectedSource := filepath.Join(environment.repository, filepath.FromSlash(protectedEntry.Source))
+			assertPathDoesNotExist(t, protectedSource)
+			manifestBefore := mustReadFile(t, manifestPath)
+
+			var passwordCalls []bool
+			result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &passwordCalls))
+			if !errors.Is(err, app.ErrProtectedRepository) {
+				t.Fatalf("Apply(%q) error = %v, want ErrProtectedRepository", test.destination, err)
+			}
+			if !strings.Contains(err.Error(), "susu rm <path>") {
+				t.Fatalf("Apply(%q) error is not actionable: %v", test.destination, err)
+			}
+			assertStrings(t, result.Applied, nil)
+			assertStrings(t, result.Skipped, nil)
+			assertPasswordCalls(t, passwordCalls, nil)
+			assertFileContents(t, earlierDestination, localEarlier)
+			assertFileContents(t, manifestPath, manifestBefore)
+			assertPathDoesNotExist(t, protectedSource)
+			for filename, contents := range controlFiles {
+				assertFileContents(t, filename, contents)
+			}
+		})
+	}
+}
+
+func TestApplyRejectsRepositorySymlinkAndCaseAliases(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{repositoryUnderHome: true, customXDG: true})
+	manifestPath := filepath.Join(environment.repository, manifest.Filename)
+
+	t.Run("symlink alias", func(t *testing.T) {
+		alias := filepath.Join(environment.home, "active-repository-destination-link")
+		if err := os.Symlink(environment.repository, alias); err != nil {
+			t.Skipf("symlinks are unavailable: %v", err)
+		}
+		entry := mustEntryForDestination(t, environment, alias, false)
+		current := manifest.New()
+		current.Entries = []manifest.Entry{entry}
+		mustSaveManifest(t, environment, current)
+		assertPathDoesNotExist(t, filepath.Join(environment.repository, filepath.FromSlash(entry.Source)))
+		manifestBefore := mustReadFile(t, manifestPath)
+
+		result, err := environment.service.Apply(nil)
+		if !errors.Is(err, app.ErrProtectedRepository) {
+			t.Fatalf("Apply(repository symlink alias) error = %v, want ErrProtectedRepository", err)
+		}
+		assertStrings(t, result.Applied, nil)
+		assertFileContents(t, manifestPath, manifestBefore)
+		if info, statErr := os.Lstat(alias); statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("protected destination symlink changed: mode = %v, error = %v", info, statErr)
+		}
+	})
+
+	t.Run("case alias", func(t *testing.T) {
+		alias := filepath.Join(filepath.Dir(environment.repository), strings.ToUpper(filepath.Base(environment.repository)))
+		repositoryInfo, err := os.Stat(environment.repository)
+		if err != nil {
+			t.Fatal(err)
+		}
+		aliasInfo, err := os.Stat(alias)
+		if err != nil || !os.SameFile(repositoryInfo, aliasInfo) {
+			t.Skip("test filesystem is case-sensitive")
+		}
+		entry := mustEntryForDestination(t, environment, alias, false)
+		current := manifest.New()
+		current.Entries = []manifest.Entry{entry}
+		mustSaveManifest(t, environment, current)
+		assertPathDoesNotExist(t, filepath.Join(environment.repository, filepath.FromSlash(entry.Source)))
+		manifestBefore := mustReadFile(t, manifestPath)
+
+		result, err := environment.service.Apply(nil)
+		if !errors.Is(err, app.ErrProtectedRepository) {
+			t.Fatalf("Apply(repository case alias) error = %v, want ErrProtectedRepository", err)
+		}
+		assertStrings(t, result.Applied, nil)
+		assertFileContents(t, manifestPath, manifestBefore)
+	})
+}
+
+func TestApplyRejectsLinkedWorktreeGitCommonDestinations(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{linkedWorktree: true, customXDG: true})
+	manifestPath := filepath.Join(environment.repository, manifest.Filename)
+	repositoryLock := filepath.Join(environment.gitCommonDirectory, "susu.lock")
+	tests := []struct {
+		name        string
+		destination string
+	}{
+		{name: "Git common root", destination: environment.gitCommonDirectory},
+		{name: "repository lock", destination: repositoryLock},
+		{name: "Git common ancestor", destination: filepath.Dir(environment.gitCommonDirectory)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			entry := mustEntryForDestination(t, environment, test.destination, false)
+			current := manifest.New()
+			current.Entries = []manifest.Entry{entry}
+			mustSaveManifest(t, environment, current)
+			assertPathDoesNotExist(t, filepath.Join(environment.repository, filepath.FromSlash(entry.Source)))
+			manifestBefore := mustReadFile(t, manifestPath)
+
+			result, err := environment.service.Apply(nil)
+			if !errors.Is(err, app.ErrProtectedRepository) {
+				t.Fatalf("Apply(%q) error = %v, want ErrProtectedRepository", test.destination, err)
+			}
+			assertStrings(t, result.Applied, nil)
+			assertFileContents(t, manifestPath, manifestBefore)
+		})
+	}
+}
+
+func TestApplyRechecksRepositorySymlinkAfterPasswordBeforeMutation(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{repositoryUnderHome: true, customXDG: true})
+	earlierStored := []byte("stored earlier apply value\n")
+	earlierLocal := []byte("local earlier apply value must remain\n")
+	earlierDestination := mustWriteFile(t, filepath.Join(environment.home, ".a-apply-preflight"), earlierStored, 0o644)
+	lateDestination := mustWriteFile(t, filepath.Join(environment.home, ".z-late-repository-alias"), []byte("stored sensitive value\n"), 0o600)
+	if _, err := environment.service.Add([]string{earlierDestination}, app.AddOptions{}); err != nil {
+		t.Fatalf("Add(earlier public) error = %v", err)
+	}
+	if _, err := environment.service.Add([]string{lateDestination}, app.AddOptions{
+		Sensitive: true,
+		Password:  recordingPasswordProvider(testPassword, nil),
+	}); err != nil {
+		t.Fatalf("Add(late sensitive) error = %v", err)
+	}
+	mustWriteFile(t, earlierDestination, earlierLocal, 0o644)
+	manifestPath := filepath.Join(environment.repository, manifest.Filename)
+	manifestBefore := mustReadFile(t, manifestPath)
+	earlierSource := repositorySource(t, environment, "~/.a-apply-preflight", false)
+	lateSource := repositorySource(t, environment, "~/.z-late-repository-alias", true)
+	earlierSourceBefore := mustReadFile(t, earlierSource)
+	lateSourceBefore := mustReadFile(t, lateSource)
+
+	var passwordCalls []bool
+	passwordProvider := func(create bool) ([]byte, error) {
+		passwordCalls = append(passwordCalls, create)
+		if err := os.Remove(lateDestination); err != nil {
+			return nil, err
+		}
+		if err := os.Symlink(environment.repository, lateDestination); err != nil {
+			return nil, err
+		}
+		return []byte(testPassword), nil
+	}
+
+	result, err := environment.service.Apply(passwordProvider)
+	if !errors.Is(err, app.ErrProtectedRepository) {
+		t.Fatalf("Apply(late repository symlink) error = %v, want ErrProtectedRepository", err)
+	}
+	assertStrings(t, result.Applied, nil)
+	assertStrings(t, result.Skipped, nil)
+	assertPasswordCalls(t, passwordCalls, []bool{false})
+	assertFileContents(t, earlierDestination, earlierLocal)
+	assertFileContents(t, earlierSource, earlierSourceBefore)
+	assertFileContents(t, lateSource, lateSourceBefore)
+	assertFileContents(t, manifestPath, manifestBefore)
+	if info, statErr := os.Lstat(lateDestination); statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("late destination was not left as a repository symlink: mode = %v, error = %v", info, statErr)
+	}
+}
+
+func TestApplySkipsExcludedSensitiveRepositoryDestination(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "linux", repositoryUnderHome: true, customXDG: true})
+	publicContents := []byte("stored public restore\n")
+	publicDestination := mustWriteFile(t, filepath.Join(environment.home, ".restore-outside-repository"), publicContents, 0o644)
+	if _, err := environment.service.Add([]string{publicDestination}, app.AddOptions{}); err != nil {
+		t.Fatalf("Add(public) error = %v", err)
+	}
+	cryptoSeed := mustWriteFile(t, filepath.Join(environment.home, ".excluded-crypto-seed"), []byte("crypto seed\n"), 0o600)
+	if _, err := environment.service.Add([]string{cryptoSeed}, app.AddOptions{
+		Sensitive: true,
+		Password:  recordingPasswordProvider(testPassword, nil),
+	}); err != nil {
+		t.Fatalf("Add(crypto seed) error = %v", err)
+	}
+	base := mustLoadManifest(t, environment)
+	publicEntry := mustFindEntry(t, base, "~/.restore-outside-repository")
+	protectedEntry := mustEntryForDestination(t, environment, filepath.Join(environment.repository, manifest.Filename), true)
+	protectedEntry.ExcludePlatforms = []string{"linux"}
+	current := manifest.New()
+	current.Crypto = base.Crypto
+	current.Entries = []manifest.Entry{publicEntry, protectedEntry}
+	mustSaveManifest(t, environment, current)
+	protectedSource := filepath.Join(environment.repository, filepath.FromSlash(protectedEntry.Source))
+	assertPathDoesNotExist(t, protectedSource)
+	if err := os.Remove(publicDestination); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(environment.repository, manifest.Filename)
+	manifestBefore := mustReadFile(t, manifestPath)
+
+	var passwordCalls []bool
+	result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &passwordCalls))
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	assertStrings(t, result.Applied, []string{publicEntry.Path})
+	assertStrings(t, result.Skipped, []string{protectedEntry.Path})
+	assertPasswordCalls(t, passwordCalls, nil)
+	assertFileContents(t, publicDestination, publicContents)
+	assertFileContents(t, manifestPath, manifestBefore)
+	assertPathDoesNotExist(t, protectedSource)
+}
+
+func TestLegacyRepositoryEntrySupportsListShowAndRemoveWithoutChangingDestination(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{repositoryUnderHome: true, customXDG: true})
+	destinationContents := []byte("protected destination must remain\n")
+	storedContents := []byte("legacy stored snapshot\n")
+	destination := mustWriteFile(t, filepath.Join(environment.repository, "legacy-protected-destination"), destinationContents, 0o644)
+	entry := mustEntryForDestination(t, environment, destination, false)
+	stored := mustWriteFile(
+		t,
+		filepath.Join(environment.repository, filepath.FromSlash(entry.Source)),
+		storedContents,
+		0o644,
+	)
+	current := manifest.New()
+	current.Entries = []manifest.Entry{entry}
+	mustSaveManifest(t, environment, current)
+
+	entries, err := environment.service.List()
+	if err != nil {
+		t.Fatalf("List() legacy repository entry error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Path != entry.Path {
+		t.Fatalf("List() legacy repository entries = %+v, want %q", entries, entry.Path)
+	}
+	assertFileContents(t, destination, destinationContents)
+
+	var output bytes.Buffer
+	if err := environment.service.Show(entry.Path, &output, nil); err != nil {
+		t.Fatalf("Show() legacy repository entry error = %v", err)
+	}
+	if !bytes.Equal(output.Bytes(), storedContents) {
+		t.Fatalf("Show() legacy repository output = %q, want %q", output.Bytes(), storedContents)
+	}
+	assertFileContents(t, destination, destinationContents)
+
+	result, err := environment.service.Remove([]string{entry.Path})
+	if err != nil {
+		t.Fatalf("Remove() legacy repository entry error = %v", err)
+	}
+	assertStrings(t, result.Removed, []string{entry.Path})
+	assertPathDoesNotExist(t, stored)
+	assertFileContents(t, destination, destinationContents)
+	assertStrings(t, managedPaths(t, environment.service), nil)
+}
+
 func TestApplyDoesNotEscapeThroughDestinationParentSymlink(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{})
 	destination := mustWriteFile(t, filepath.Join(environment.home, "redirect", "victim"), []byte("managed\n"), 0o644)
@@ -1290,6 +1804,50 @@ func TestInitRejectsLocalStateInsideRepository(t *testing.T) {
 	}
 	if _, err := service.Init(repositoryRoot); err == nil || !strings.Contains(err.Error(), "must not be stored inside") {
 		t.Fatalf("Init() error = %v, want local-state confinement error", err)
+	}
+	assertPathDoesNotExist(t, store.Path())
+}
+
+func TestInitRejectsLocalStateInsideGitCommonDirectory(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	primary := filepath.Join(root, "primary")
+	linked := filepath.Join(root, "linked")
+	for _, directory := range []string{home, primary} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitExecutable, err := exec.LookPath("git")
+	if err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+	runTestGit(t, gitExecutable, "init", "--quiet", primary)
+	runTestGit(
+		t,
+		gitExecutable,
+		"-C", primary,
+		"-c", "user.name=susu tests",
+		"-c", "user.email=susu-tests@example.invalid",
+		"-c", "commit.gpgSign=false",
+		"commit", "--quiet", "--allow-empty", "-m", "linked worktree fixture",
+	)
+	runTestGit(t, gitExecutable, "-C", primary, "worktree", "add", "--quiet", "--detach", linked, "HEAD")
+
+	resolver, err := paths.NewResolverAt(home, "", home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.NewStore(home, filepath.Join(primary, ".git", "local-state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := app.New(store, resolver, "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Init(linked); err == nil || !strings.Contains(err.Error(), "Git common directory") {
+		t.Fatalf("Init() error = %v, want Git-common-directory confinement error", err)
 	}
 	assertPathDoesNotExist(t, store.Path())
 }
@@ -1381,20 +1939,24 @@ func TestConcurrentAddsThroughDifferentStateHomesDoNotLoseManifestUpdates(t *tes
 }
 
 type testEnvironmentOptions struct {
-	platform        string
-	customXDG       bool
-	pathsWithSpaces bool
+	platform            string
+	customXDG           bool
+	pathsWithSpaces     bool
+	repositoryUnderHome bool
+	linkedWorktree      bool
 }
 
 type testEnvironment struct {
-	root          string
-	home          string
-	xdgConfigHome string
-	xdgStateHome  string
-	repository    string
-	store         *state.Store
-	resolver      *paths.Resolver
-	service       *app.Service
+	root               string
+	home               string
+	xdgConfigHome      string
+	xdgStateHome       string
+	repository         string
+	repositoryInput    string
+	gitCommonDirectory string
+	store              *state.Store
+	resolver           *paths.Resolver
+	service            *app.Service
 }
 
 func newTestEnvironment(t *testing.T, options testEnvironmentOptions) *testEnvironment {
@@ -1419,6 +1981,9 @@ func newTestEnvironment(t *testing.T, options testEnvironmentOptions) *testEnvir
 	}
 	home := filepath.Join(root, homeName)
 	repositoryInput := filepath.Join(root, repositoryName)
+	if options.repositoryUnderHome {
+		repositoryInput = filepath.Join(home, "src", repositoryName)
+	}
 	configuredXDGConfig := ""
 	configuredXDGState := ""
 	xdgConfigHome := filepath.Join(home, ".config")
@@ -1429,14 +1994,17 @@ func newTestEnvironment(t *testing.T, options testEnvironmentOptions) *testEnvir
 		xdgConfigHome = configuredXDGConfig
 		xdgStateHome = configuredXDGState
 	}
-	for _, directory := range []string{
+	directories := []string{
 		home,
 		xdgConfigHome,
 		filepath.Join(root, "xdg-cache"),
 		filepath.Join(root, "xdg-data"),
 		filepath.Join(root, "tmp"),
-		repositoryInput,
-	} {
+	}
+	if !options.linkedWorktree {
+		directories = append(directories, repositoryInput)
+	}
+	for _, directory := range directories {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -1455,9 +2023,26 @@ func newTestEnvironment(t *testing.T, options testEnvironmentOptions) *testEnvir
 	if err != nil {
 		t.Skipf("git unavailable: %v", err)
 	}
-	command := exec.Command(gitExecutable, "init", "--quiet", repositoryInput)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("git init %q: %v\n%s", repositoryInput, err, output)
+	gitCommonDirectory := filepath.Join(repositoryInput, ".git")
+	if options.linkedWorktree {
+		primary := filepath.Join(home, "primary-repository")
+		if err := os.MkdirAll(primary, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		runTestGit(t, gitExecutable, "init", "--quiet", primary)
+		runTestGit(
+			t,
+			gitExecutable,
+			"-C", primary,
+			"-c", "user.name=susu tests",
+			"-c", "user.email=susu-tests@example.invalid",
+			"-c", "commit.gpgSign=false",
+			"commit", "--quiet", "--allow-empty", "-m", "linked worktree fixture",
+		)
+		runTestGit(t, gitExecutable, "-C", primary, "worktree", "add", "--quiet", "--detach", repositoryInput, "HEAD")
+		gitCommonDirectory = filepath.Join(primary, ".git")
+	} else {
+		runTestGit(t, gitExecutable, "init", "--quiet", repositoryInput)
 	}
 
 	resolver, err := paths.NewResolverFromEnv()
@@ -1489,14 +2074,24 @@ func newTestEnvironment(t *testing.T, options testEnvironmentOptions) *testEnvir
 	}
 
 	return &testEnvironment{
-		root:          root,
-		home:          home,
-		xdgConfigHome: xdgConfigHome,
-		xdgStateHome:  xdgStateHome,
-		repository:    repositoryRoot,
-		store:         store,
-		resolver:      resolver,
-		service:       service,
+		root:               root,
+		home:               home,
+		xdgConfigHome:      xdgConfigHome,
+		xdgStateHome:       xdgStateHome,
+		repository:         repositoryRoot,
+		repositoryInput:    repositoryInput,
+		gitCommonDirectory: gitCommonDirectory,
+		store:              store,
+		resolver:           resolver,
+		service:            service,
+	}
+}
+
+func runTestGit(t *testing.T, executable string, arguments ...string) {
+	t.Helper()
+	command := exec.Command(executable, arguments...)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(arguments, " "), err, output)
 	}
 }
 
@@ -1548,6 +2143,19 @@ func mustSaveManifest(t *testing.T, environment *testEnvironment, current manife
 	}
 }
 
+func mustEntryForDestination(t *testing.T, environment *testEnvironment, destination string, sensitive bool) manifest.Entry {
+	t.Helper()
+	logical, err := environment.resolver.Normalize(destination)
+	if err != nil {
+		t.Fatalf("normalize destination %q: %v", destination, err)
+	}
+	source, err := manifest.SourceFor(logical, sensitive)
+	if err != nil {
+		t.Fatalf("SourceFor(%q): %v", logical, err)
+	}
+	return manifest.Entry{Path: logical, Source: source, Sensitive: sensitive}
+}
+
 func mustFindEntry(t *testing.T, current manifest.Manifest, logical string) manifest.Entry {
 	t.Helper()
 	index := manifest.Find(current, logical)
@@ -1577,6 +2185,19 @@ func managedPaths(t *testing.T, service *app.Service) []string {
 		result[index] = entry.Path
 	}
 	return result
+}
+
+func mustReadDirectoryNames(t *testing.T, directory string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatalf("read directory %q: %v", directory, err)
+	}
+	names := make([]string, len(entries))
+	for index, entry := range entries {
+		names[index] = entry.Name()
+	}
+	return names
 }
 
 func assertStrings(t *testing.T, got, want []string) {
