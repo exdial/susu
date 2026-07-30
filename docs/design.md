@@ -79,6 +79,8 @@ The local binding is intentionally small and unversioned:
 
 The state decoder accepts only that field, rejects trailing data, requires a clean absolute path, and limits the file to 64 KiB. Writes use a `0700` state directory and a `0600` state file, with same-directory temporary-file replacement and file/directory synchronization.
 
+The entire private `susu` state directory is a protected local control root. `add` rejects an explicit input that is inside this directory, names the directory itself, or is an ancestor containing it. `apply` rejects every applicable manifest destination that overlaps it after platform filtering but before password prompting or repository-source access. Canonical, symlink, physical, case, and hard-linked aliases of protected state files exposed by the filesystem are included. `list`, `show`, and `rm` remain available for inspecting and removing legacy entries that predate this protection.
+
 ### Binding lifecycle
 
 `init` accepts an existing Git worktree root. It:
@@ -271,18 +273,19 @@ Manifest validity is structural. Loading the manifest does not prove that every 
 | FIFO, socket, device, or other non-regular object | Error | Skipped |
 | Empty directory | Produces no entry | Produces no entry |
 
-Candidate discovery completes before repository sources are written. Each file is opened again through the confined filesystem layer immediately before reading; the descriptor that is verified as regular is the descriptor read. If a candidate is replaced by a symlink or non-regular object between discovery and reading, the operation fails rather than following the replacement.
+Candidate discovery completes before repository sources are written. After any required password callback, `add` performs a command-wide preflight that reopens and validates every new candidate before reading any candidate content or writing any repository source. This catches a protected hard link substituted during password entry without partially processing an earlier candidate. Each file is then reopened through the confined filesystem layer immediately before reading; the descriptor that is verified as regular is the descriptor read. Both passes compare the opened descriptor's filesystem identity with the protected state-file identities captured under the state lock. If a candidate is later replaced by a symlink, non-regular object, or hard link to protected local state, that candidate fails before its content is read or stored.
 
 This is not a simultaneous snapshot of a directory tree. Files are read one at a time and are not locked against modification by other processes, so concurrent writers can change bytes while or between files being captured.
 
-Directory expansion has no ignore mechanism. It does not automatically exclude the active repository, its `.git` directory, local XDG state, lock files, or `susu` staging files. Adding an ancestor that contains those locations can capture control data—including the machine-local repository path—and repeated adds can discover repository files created by earlier operations. Inputs should be scoped so they do not contain `susu` or Git control locations.
+Directory expansion has no general ignore mechanism. Before walking, `add` rejects any input whose canonical or physical path overlaps the active private `susu` state directory; this includes an ancestor directory that contains the state directory. A hard-linked protected state file discovered inside an otherwise unrelated tree is rejected during the walk. `add` still does not automatically exclude the active repository, its `.git` directory, or `susu` repository/destination staging files. Adding an ancestor that contains those unprotected locations can capture control data or recursively discover repository files created by earlier operations. Inputs should be scoped so they do not contain the repository or Git control locations.
 
 ## Command and data flows
 
 ```mermaid
 flowchart TB
     Manifest[Load and validate manifest] --> Filter[Filter platform exclusions]
-    Filter --> Unlock[Unlock once if sensitive data is needed]
+    Filter --> StateGuard[Reject local state destinations]
+    StateGuard --> Unlock[Unlock once if sensitive data is needed]
     Unlock --> Preflight[Open sources and authenticate ciphertext]
     Preflight --> Conflicts[Check concrete destination conflicts]
     Conflicts --> Replace[Stage, sync, and rename each destination]
@@ -302,13 +305,14 @@ For one invocation, `add`:
 
 1. validates and normalizes platform exclusions;
 2. opens the bound repository and loads the manifest under both locks;
-3. discovers and sorts all regular-file candidates;
-4. separates already-managed identities from new identities;
-5. unlocks or initializes repository crypto once when at least one new sensitive entry exists;
-6. reads each new candidate through a no-follow descriptor, with a 512 MiB per-file limit;
-7. encrypts sensitive bytes in memory or retains public bytes;
-8. atomically installs each new repository source without replacing an existing path; and
-9. atomically replaces `susu.json` after all new sources are installed.
+3. rejects inputs that overlap or contain the active private `susu` state directory;
+4. discovers and sorts all regular-file candidates;
+5. separates already-managed identities from new identities;
+6. unlocks or initializes repository crypto once when at least one new sensitive entry exists;
+7. reads each new candidate through a no-follow descriptor, with a 512 MiB per-file limit;
+8. encrypts sensitive bytes in memory or retains public bytes;
+9. atomically installs each new repository source without replacing an existing path; and
+10. atomically replaces `susu.json` after all new sources are installed.
 
 Already-managed entries keep their original source bytes, sensitivity, and exclusions. A sensitive invocation containing only already-managed paths does not prompt for a password. Existing unreferenced data at a candidate's deterministic source path is treated as a collision and is not overwritten.
 
@@ -341,15 +345,15 @@ No plaintext temporary file is created by `show`. Standard output is the intenti
 `apply` operates on a logical-path-sorted view of the manifest:
 
 1. entries excluded for `runtime.GOOS` are recorded as skipped and removed from further processing;
-2. the repository is unlocked once if any remaining entry is sensitive;
-3. every applicable source is opened through a stable no-follow descriptor;
-4. each sensitive source is read, authenticated, and decrypted in memory before any destination changes;
-5. public source size and mode are checked while its descriptor remains open;
-6. logical destinations are split into HOME/XDG roots and relative paths;
+2. every applicable logical destination is resolved and rejected if it overlaps the active private `susu` state directory;
+3. the repository is unlocked once if any remaining entry is sensitive;
+4. every applicable source is opened through a stable no-follow descriptor;
+5. each sensitive source is read, authenticated, and decrypted in memory before any destination changes;
+6. public source size and mode are checked while its descriptor remains open;
 7. exact lexical and ancestor conflicts between concrete destination strings are rejected; and
 8. each prepared entry is staged and atomically renamed into place in logical-path order.
 
-Platform filtering occurs before password requirements and source access. An excluded sensitive entry therefore does not cause a password prompt by itself.
+Platform filtering and local-state destination protection occur before password requirements and source access. An excluded sensitive entry therefore does not cause a password prompt by itself, while an applicable legacy entry targeting local state fails before an unlock attempt.
 
 Public sources are limited to 1 GiB by their preflight file size and then streamed from the retained descriptor during replacement. Sensitive serialized sources are read with the same 1 GiB limit. Decrypted sensitive plaintext remains in memory for the full preflight, with a 1 GiB aggregate limit across applicable sensitive entries.
 
@@ -367,7 +371,7 @@ For each destination, `apply`:
 
 A leaf symlink is replaced by the rename rather than followed. A symlink in any component below the logical HOME/XDG root causes an error. Existing regular files are replaced without a local-change comparison or backup.
 
-Confinement limits destinations to HOME/XDG roots but does not impose a control-file denylist. If the active repository, `.git`, or local state is located beneath one of those roots, a corresponding manifest entry can overwrite it during `apply`. Manifest provenance and destination review are therefore part of the trust boundary.
+Confinement limits destinations to HOME/XDG roots and separately protects the active private `susu` state directory, including its binding, lock, and staging names. It does not impose a denylist for the active repository, `.git`, or other control files beneath the permitted roots. A corresponding manifest entry can still overwrite those unprotected locations during `apply`, so manifest provenance and destination review remain part of the trust boundary.
 
 ## Transaction, atomicity, and failure behavior
 
@@ -454,7 +458,7 @@ The implemented model has these deliberate or practical limits:
 - Existing entries cannot be refreshed through `add`; it is membership capture, not synchronization.
 - Restore overwrites applicable destinations without conflict detection against local contents, backups, or a command-wide rollback.
 - Entries represent regular files only. Symlinks, special files, empty directories, and directory metadata are not preserved.
-- Recursive input has no ignore list and destination application has no denylist for repository, Git, state, lock, or staging paths beneath the permitted roots.
+- Recursive input and destination application reject canonical or physical overlap with the active private `susu` state directory. There is no general ignore/denylist for repository, Git, or staging paths beneath the permitted roots.
 - Destination conflict detection is lexical; case- or Unicode-normalization-equivalent names can alias on some filesystems.
 - Public mode portability is limited to non-executable versus executable; sensitive destinations are always `0600`.
 - `add` reads one complete input file into memory. Sensitive `show` reads and decrypts one complete envelope in memory. `apply` retains all applicable sensitive plaintext through preflight.

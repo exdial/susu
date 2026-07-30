@@ -51,6 +51,7 @@ func TestHelp(t *testing.T) {
 				"Usage: susu add [options] <path...>",
 				"--sensitive",
 				"--exclude-platform <value>",
+				"machine-local state directory are rejected",
 				"Examples:",
 			},
 		},
@@ -88,6 +89,7 @@ func TestHelp(t *testing.T) {
 				"Usage: susu apply",
 				"Restore repository versions",
 				"current-platform exclusions",
+				"before source access or a password prompt",
 			},
 		},
 	}

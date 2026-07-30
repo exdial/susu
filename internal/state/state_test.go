@@ -47,6 +47,9 @@ func TestStorePaths(t *testing.T) {
 			if store.Path() != test.want {
 				t.Fatalf("Path() = %q, want %q", store.Path(), test.want)
 			}
+			if store.Directory() != filepath.Dir(test.want) {
+				t.Fatalf("Directory() = %q, want %q", store.Directory(), filepath.Dir(test.want))
+			}
 		})
 	}
 }

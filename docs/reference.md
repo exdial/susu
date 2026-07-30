@@ -139,6 +139,8 @@ A directory is expanded into one manifest entry per discovered file. The directo
 
 `add` means **start managing**, not synchronize. For each new file it resolves the path, derives a portable logical destination, copies or encrypts its current contents into the repository, and adds an entry to `susu.json`. If an input is already managed, its entry is not duplicated and its stored contents are not silently overwritten. In a mixed invocation, new inputs can still be added while existing entries remain unchanged.
 
+The active private `susu` state directory is never a valid managed input. `add` rejects the state directory, any path inside it, and any ancestor input that contains it. Canonical, symlink, physical, case, and hard-linked aliases of protected state files exposed by the filesystem are checked. Direct and ancestor overlaps are rejected before directory walking or a sensitive password prompt. A protected hard link inside an otherwise unrelated directory is rejected during discovery. After any required password callback, `add` reopens and validates every new candidate before reading any candidate content or writing any repository source, so a protected hard link substituted during password entry fails command-wide. Each source is reopened and its descriptor checked again immediately before its own read; a later protected replacement fails before that candidate's content is read or stored. Use a narrower input path rather than adding an ancestor containing the state directory.
+
 Public files use a Git-portable mode policy: non-executable files are stored and applied as `0644`, while files with any executable bit are stored and applied as `0755`. Git does not preserve arbitrary Unix permission bits. Sensitive destinations always use `0600`.
 
 #### Symlinks and special files
@@ -151,6 +153,22 @@ The behavior is intentionally conservative:
 - `apply` confines every destination operation to its resolved HOME or XDG root. A leaf symlink at a managed destination is atomically replaced by a regular file; symlinks in parent components are rejected.
 
 This policy prevents a recursively added tree from copying the contents of an unexpected symlink target into the repository.
+
+#### Protected local state
+
+The protected directory is the directory containing the active `state.json`, its sibling `lock`, and state staging files:
+
+```text
+$XDG_STATE_HOME/susu/
+```
+
+with the default fallback:
+
+```text
+~/.local/state/susu/
+```
+
+A file in a sibling directory outside this exact `susu` state directory remains manageable unless it is a hard-linked alias of a protected state file. Repositories created by older versions may already contain a state entry. `list` and `show` can inspect it, `rm` can remove it, and `apply` refuses an applicable protected destination until it is removed.
 
 #### Shell expansion
 
@@ -252,10 +270,11 @@ susu apply
 - public entries are copied from `public/...`;
 - sensitive entries are authenticated and decrypted directly to their destinations;
 - entries excluded for the current platform are skipped;
+- applicable destinations overlapping the active private `susu` state directory are rejected;
 - required parent directories are created; and
 - destination creation and replacement use safe semantics rather than exposing partial results.
 
-If one or more applicable sensitive entries exist, the password is read once for the invocation and the unlocked master key is reused only in that process. Every ciphertext is authenticated in memory before any destination is changed, and no plaintext is created inside the repository.
+Platform filtering and local-state destination checks happen before repository-source access or a password prompt. Therefore an excluded protected entry is skipped normally, while an applicable protected entry aborts the invocation without changing any destination. If one or more remaining sensitive entries exist, the password is read once and the unlocked master key is reused only in that process. Every ciphertext is authenticated in memory before any destination is changed, and no plaintext is created inside the repository.
 
 Portable atomic replacement on both macOS and Linux requires a short-lived, randomly named staging file next to the final destination. For sensitive entries it is created as `0600`, written only after authentication, synced, and atomically renamed. Normal failures remove it; a crash or power loss can leave a `.susu-apply-*.tmp` plaintext residue until a later `apply` cleans stale staging files. Atomicity is per destination: an I/O failure after earlier renames can leave those earlier files applied, and the CLI reports them before returning the error.
 
@@ -292,7 +311,7 @@ If `XDG_STATE_HOME` is unset, the fallback is:
 ~/.local/state/susu/state.json
 ```
 
-That state file contains the canonical repository path for this machine and must not be committed to the dotfiles repository. `susu init` rejects an XDG state location inside the selected repository. A private sibling `lock` protects binding changes, while `.git/susu.lock` in Git's common administrative directory serializes repository operations across different local state homes. Neither lock is committed.
+That state file contains the canonical repository path for this machine and must not be committed to the dotfiles repository. `susu init` rejects an XDG state location inside the selected repository. The complete private `susu` state directory is also rejected by `add` and protected from applicable `apply` destinations. A private sibling `lock` protects binding changes, while `.git/susu.lock` in Git's common administrative directory serializes repository operations across different local state homes. Neither lock is committed.
 
 ## Repository layout
 
@@ -405,7 +424,7 @@ Commit the resulting manifest and storage with Git. After cloning and running `s
 - One local `susu` installation binds to one active repository at a time.
 - `add` snapshots new entries but does not update or synchronize entries already managed.
 - There are no `sync`, `status`, or `diff` commands.
-- `add` rejects explicit symlinks and skips all symlinks encountered during directory traversal; symlinks are not preserved.
+- `add` rejects explicit symlinks, skips all symlinks encountered during directory traversal, and rejects inputs that overlap or contain the active private `susu` state directory; symlinks are not preserved.
 - Shell globs are not implemented by `susu`; expansion is the shell's responsibility.
 - Sensitive classification is explicit. There is no automatic secret detection.
 - Platform exclusions are explicit. Paths do not trigger automatic platform detection.

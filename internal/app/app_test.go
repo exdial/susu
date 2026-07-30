@@ -272,6 +272,298 @@ func TestAddRejectsExplicitSymlinksAndSkipsWalkedSymlinks(t *testing.T) {
 	assertStrings(t, managedPaths(t, environment.service), wantPaths)
 }
 
+func TestAddRejectsLocalStatePathsBeforePassword(t *testing.T) {
+	tests := []struct {
+		name  string
+		input func(*testEnvironment) string
+	}{
+		{name: "state file", input: func(environment *testEnvironment) string { return environment.store.Path() }},
+		{name: "state directory", input: func(environment *testEnvironment) string { return environment.store.Directory() }},
+		{name: "state lock", input: func(environment *testEnvironment) string {
+			return filepath.Join(environment.store.Directory(), "lock")
+		}},
+		{name: "state staging file", input: func(environment *testEnvironment) string {
+			return filepath.Join(environment.store.Directory(), ".state-orphan.tmp")
+		}},
+		{name: "ancestor containing state", input: func(environment *testEnvironment) string { return environment.home }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment := newTestEnvironment(t, testEnvironmentOptions{})
+			var passwordCalls []bool
+			result, err := environment.service.Add([]string{test.input(environment)}, app.AddOptions{
+				Sensitive: true,
+				Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+			})
+			if !errors.Is(err, app.ErrProtectedLocalState) {
+				t.Fatalf("Add() error = %v, want ErrProtectedLocalState", err)
+			}
+			if !strings.Contains(err.Error(), "choose a narrower input path") {
+				t.Fatalf("Add() error is not actionable: %v", err)
+			}
+			assertStrings(t, result.Added, nil)
+			assertStrings(t, result.AlreadyManaged, nil)
+			assertPasswordCalls(t, passwordCalls, nil)
+			assertStrings(t, managedPaths(t, environment.service), nil)
+			boundRepository, loadErr := environment.store.Load()
+			if loadErr != nil || boundRepository != environment.repository {
+				t.Fatalf("local state changed after rejected Add(): repository = %q, error = %v", boundRepository, loadErr)
+			}
+		})
+	}
+}
+
+func TestAddAllowsSiblingOutsideLocalStateDirectory(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	destination := mustWriteFile(
+		t,
+		filepath.Join(filepath.Dir(environment.store.Directory()), "other", "config"),
+		[]byte("ordinary local state sibling\n"),
+		0o600,
+	)
+
+	result, err := environment.service.Add([]string{destination}, app.AddOptions{})
+	if err != nil {
+		t.Fatalf("Add() sibling error = %v", err)
+	}
+	assertStrings(t, result.Added, []string{"~/.local/state/other/config"})
+}
+
+func TestAddProtectsCustomLocalStateDirectory(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	customStore, err := state.NewStore(environment.home, filepath.Join(environment.home, "custom-state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := app.New(customStore, environment.resolver, "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Init(environment.repository); err != nil {
+		t.Fatal(err)
+	}
+
+	var passwordCalls []bool
+	_, err = service.Add([]string{customStore.Path()}, app.AddOptions{
+		Sensitive: true,
+		Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+	})
+	if !errors.Is(err, app.ErrProtectedLocalState) {
+		t.Fatalf("Add(custom state) error = %v, want ErrProtectedLocalState", err)
+	}
+	assertPasswordCalls(t, passwordCalls, nil)
+}
+
+func TestAddRejectsCaseAliasedLocalStatePath(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	aliasedDirectory := filepath.Join(
+		filepath.Dir(environment.store.Directory()),
+		strings.ToUpper(filepath.Base(environment.store.Directory())),
+	)
+	aliasedState := filepath.Join(aliasedDirectory, filepath.Base(environment.store.Path()))
+	stateInfo, err := os.Stat(environment.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasInfo, err := os.Stat(aliasedState)
+	if err != nil || !os.SameFile(stateInfo, aliasInfo) {
+		t.Skip("test filesystem is case-sensitive")
+	}
+
+	if _, err := environment.service.Add([]string{aliasedState}, app.AddOptions{}); !errors.Is(err, app.ErrProtectedLocalState) {
+		t.Fatalf("Add(case alias) error = %v, want ErrProtectedLocalState", err)
+	}
+}
+
+func TestAddRejectsSymlinkedLocalStatePath(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	stateBefore := mustReadFile(t, environment.store.Path())
+	aliasDirectory := filepath.Join(environment.home, "state-root-link")
+	if err := os.Symlink(environment.store.Directory(), aliasDirectory); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	alias := filepath.Join(aliasDirectory, filepath.Base(environment.store.Path()))
+
+	var passwordCalls []bool
+	result, err := environment.service.Add([]string{alias}, app.AddOptions{
+		Sensitive: true,
+		Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+	})
+	if !errors.Is(err, app.ErrProtectedLocalState) {
+		t.Fatalf("Add(state symlink alias) error = %v, want ErrProtectedLocalState", err)
+	}
+	assertStrings(t, result.Added, nil)
+	assertStrings(t, result.AlreadyManaged, nil)
+	assertPasswordCalls(t, passwordCalls, nil)
+	assertStrings(t, managedPaths(t, environment.service), nil)
+	assertFileContents(t, environment.store.Path(), stateBefore)
+}
+
+func TestAddRejectsHardLinkedLocalStateFileDuringDirectoryWalk(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  func(*testEnvironment) string
+		prepare func(*testing.T, string)
+	}{
+		{
+			name:   "state file",
+			target: func(environment *testEnvironment) string { return environment.store.Path() },
+		},
+		{
+			name: "state lock",
+			target: func(environment *testEnvironment) string {
+				return filepath.Join(environment.store.Directory(), "lock")
+			},
+		},
+		{
+			name: "state staging file",
+			target: func(environment *testEnvironment) string {
+				return filepath.Join(environment.store.Directory(), ".state-orphan.tmp")
+			},
+			prepare: func(t *testing.T, target string) {
+				mustWriteFile(t, target, []byte("orphaned local state staging data\n"), 0o600)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment := newTestEnvironment(t, testEnvironmentOptions{})
+			target := test.target(environment)
+			if test.prepare != nil {
+				test.prepare(t, target)
+			}
+			targetBefore := mustReadFile(t, target)
+			stateBefore := mustReadFile(t, environment.store.Path())
+			manifestPath := filepath.Join(environment.repository, manifest.Filename)
+			manifestBefore := mustReadFile(t, manifestPath)
+
+			aliasDirectory := filepath.Join(environment.home, "state-aliases")
+			if err := os.MkdirAll(aliasDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			alias := filepath.Join(aliasDirectory, "protected-copy")
+			if err := os.Link(target, alias); err != nil {
+				t.Skipf("hard links are unavailable: %v", err)
+			}
+			logical, err := environment.resolver.Normalize(alias)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var passwordCalls []bool
+			_, err = environment.service.Add([]string{aliasDirectory}, app.AddOptions{
+				Sensitive: true,
+				Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+			})
+			if !errors.Is(err, app.ErrProtectedLocalState) {
+				t.Fatalf("Add(hard-link directory) error = %v, want ErrProtectedLocalState", err)
+			}
+			assertPasswordCalls(t, passwordCalls, nil)
+			assertStrings(t, managedPaths(t, environment.service), nil)
+			assertPathDoesNotExist(t, repositorySource(t, environment, logical, true))
+			assertFileContents(t, manifestPath, manifestBefore)
+			assertFileContents(t, environment.store.Path(), stateBefore)
+			assertFileContents(t, target, targetBefore)
+			assertFileContents(t, alias, targetBefore)
+		})
+	}
+}
+
+func TestAddRechecksHardLinkedLocalStateFileAfterPassword(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  func(*testEnvironment) string
+		prepare func(*testing.T, string)
+	}{
+		{
+			name:   "state file",
+			target: func(environment *testEnvironment) string { return environment.store.Path() },
+		},
+		{
+			name: "state lock",
+			target: func(environment *testEnvironment) string {
+				return filepath.Join(environment.store.Directory(), "lock")
+			},
+		},
+		{
+			name: "state staging file",
+			target: func(environment *testEnvironment) string {
+				return filepath.Join(environment.store.Directory(), ".state-orphan.tmp")
+			},
+			prepare: func(t *testing.T, target string) {
+				mustWriteFile(t, target, []byte("orphaned local state staging data\n"), 0o600)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment := newTestEnvironment(t, testEnvironmentOptions{})
+			target := test.target(environment)
+			if test.prepare != nil {
+				test.prepare(t, target)
+			}
+			targetBefore := mustReadFile(t, target)
+			stateBefore := mustReadFile(t, environment.store.Path())
+			earlier := mustWriteFile(
+				t,
+				filepath.Join(environment.home, "preflight-before", "nested", "ordinary"),
+				[]byte("ordinary earlier candidate\n"),
+				0o600,
+			)
+			candidate := mustWriteFile(
+				t,
+				filepath.Join(environment.home, "z-late-state-alias"),
+				[]byte("ordinary late candidate\n"),
+				0o600,
+			)
+			probe := candidate + ".hard-link-probe"
+			if err := os.Link(target, probe); err != nil {
+				t.Skipf("hard links are unavailable: %v", err)
+			}
+			if err := os.Remove(probe); err != nil {
+				t.Fatal(err)
+			}
+			manifestPath := filepath.Join(environment.repository, manifest.Filename)
+			manifestBefore := mustReadFile(t, manifestPath)
+
+			var passwordCalls []bool
+			passwordProvider := func(create bool) ([]byte, error) {
+				passwordCalls = append(passwordCalls, create)
+				if err := os.Remove(candidate); err != nil {
+					return nil, err
+				}
+				if err := os.Link(target, candidate); err != nil {
+					return nil, err
+				}
+				return []byte(testPassword), nil
+			}
+
+			result, err := environment.service.Add(
+				[]string{earlier, candidate},
+				app.AddOptions{Sensitive: true, Password: passwordProvider},
+			)
+			if !errors.Is(err, app.ErrProtectedLocalState) {
+				t.Fatalf("Add(late hard link) error = %v, want ErrProtectedLocalState", err)
+			}
+			assertStrings(t, result.Added, nil)
+			assertStrings(t, result.AlreadyManaged, nil)
+			assertPasswordCalls(t, passwordCalls, []bool{true})
+			assertStrings(t, managedPaths(t, environment.service), nil)
+			earlierSource := repositorySource(t, environment, "~/preflight-before/nested/ordinary", true)
+			assertPathDoesNotExist(t, earlierSource)
+			assertPathDoesNotExist(t, filepath.Dir(filepath.Dir(earlierSource)))
+			assertPathDoesNotExist(t, repositorySource(t, environment, "~/z-late-state-alias", true))
+			assertFileContents(t, manifestPath, manifestBefore)
+			assertFileContents(t, environment.store.Path(), stateBefore)
+			assertFileContents(t, target, targetBefore)
+			assertFileContents(t, candidate, targetBefore)
+		})
+	}
+}
+
 func TestListOrdersAndFormatsPlatformExclusions(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{})
 	zeta := mustWriteFile(t, filepath.Join(environment.home, ".zeta"), []byte("zeta\n"), 0o644)
@@ -631,6 +923,321 @@ func TestPathsWithSpaces(t *testing.T) {
 	}
 }
 
+func TestApplyRejectsLocalStateDestinationBeforePasswordOrMutation(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	publicDestination := mustWriteFile(t, filepath.Join(environment.home, ".a-public"), []byte("stored public\n"), 0o644)
+	sensitiveDestination := mustWriteFile(t, filepath.Join(environment.home, ".z-sensitive"), []byte("stored secret\n"), 0o600)
+	if _, err := environment.service.Add([]string{publicDestination}, app.AddOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.service.Add([]string{sensitiveDestination}, app.AddOptions{
+		Sensitive: true,
+		Password:  recordingPasswordProvider(testPassword, nil),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, publicDestination, []byte("local public must remain\n"), 0o644)
+	mustWriteFile(t, sensitiveDestination, []byte("local secret must remain\n"), 0o600)
+	stateBefore := mustReadFile(t, environment.store.Path())
+
+	protectedLogical, err := environment.resolver.Normalize(environment.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedSource, err := manifest.SourceFor(protectedLogical, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := mustLoadManifest(t, environment)
+	current.Entries = append(current.Entries, manifest.Entry{Path: protectedLogical, Source: protectedSource})
+	mustSaveManifest(t, environment, current)
+	assertPathDoesNotExist(t, filepath.Join(environment.repository, filepath.FromSlash(protectedSource)))
+
+	var passwordCalls []bool
+	result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &passwordCalls))
+	if !errors.Is(err, app.ErrProtectedLocalState) {
+		t.Fatalf("Apply() error = %v, want ErrProtectedLocalState", err)
+	}
+	if !strings.Contains(err.Error(), "susu rm <path>") {
+		t.Fatalf("Apply() error is not actionable: %v", err)
+	}
+	assertStrings(t, result.Applied, nil)
+	assertStrings(t, result.Skipped, nil)
+	assertPasswordCalls(t, passwordCalls, nil)
+	assertFileContents(t, environment.store.Path(), stateBefore)
+	assertFileContents(t, publicDestination, []byte("local public must remain\n"))
+	assertFileContents(t, sensitiveDestination, []byte("local secret must remain\n"))
+}
+
+func TestApplyRejectsLocalStateDirectoryControlPathsAndAncestor(t *testing.T) {
+	tests := []struct {
+		name   string
+		target func(*testEnvironment) string
+	}{
+		{name: "state directory", target: func(environment *testEnvironment) string { return environment.store.Directory() }},
+		{name: "state lock", target: func(environment *testEnvironment) string { return filepath.Join(environment.store.Directory(), "lock") }},
+		{name: "state staging file", target: func(environment *testEnvironment) string {
+			return filepath.Join(environment.store.Directory(), ".state-orphan.tmp")
+		}},
+		{name: "state directory ancestor", target: func(environment *testEnvironment) string { return filepath.Dir(environment.store.Directory()) }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment := newTestEnvironment(t, testEnvironmentOptions{})
+			logical, err := environment.resolver.Normalize(test.target(environment))
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err := manifest.SourceFor(logical, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current := mustLoadManifest(t, environment)
+			current.Entries = append(current.Entries, manifest.Entry{Path: logical, Source: source})
+			mustSaveManifest(t, environment, current)
+
+			result, err := environment.service.Apply(nil)
+			if !errors.Is(err, app.ErrProtectedLocalState) {
+				t.Fatalf("Apply() error = %v, want ErrProtectedLocalState", err)
+			}
+			assertStrings(t, result.Applied, nil)
+		})
+	}
+}
+
+func TestApplyRejectsSymlinkedLocalStateDestination(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	stateBefore := mustReadFile(t, environment.store.Path())
+	aliasDirectory := filepath.Join(environment.home, "state-root-link")
+	if err := os.Symlink(environment.store.Directory(), aliasDirectory); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	alias := filepath.Join(aliasDirectory, filepath.Base(environment.store.Path()))
+	logical, err := environment.resolver.Normalize(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := manifest.SourceFor(logical, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := mustLoadManifest(t, environment)
+	current.Entries = append(current.Entries, manifest.Entry{Path: logical, Source: source})
+	mustSaveManifest(t, environment, current)
+
+	result, err := environment.service.Apply(nil)
+	if !errors.Is(err, app.ErrProtectedLocalState) {
+		t.Fatalf("Apply(state symlink alias) error = %v, want ErrProtectedLocalState", err)
+	}
+	assertStrings(t, result.Applied, nil)
+	assertFileContents(t, environment.store.Path(), stateBefore)
+}
+
+func TestApplyRejectsCaseAliasedLocalStateDestination(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	aliasedDirectory := filepath.Join(
+		filepath.Dir(environment.store.Directory()),
+		strings.ToUpper(filepath.Base(environment.store.Directory())),
+	)
+	aliasedState := filepath.Join(aliasedDirectory, filepath.Base(environment.store.Path()))
+	stateInfo, err := os.Stat(environment.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasInfo, err := os.Stat(aliasedState)
+	if err != nil || !os.SameFile(stateInfo, aliasInfo) {
+		t.Skip("test filesystem is case-sensitive")
+	}
+	stateBefore := mustReadFile(t, environment.store.Path())
+	logical, err := environment.resolver.Normalize(aliasedState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := manifest.SourceFor(logical, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := mustLoadManifest(t, environment)
+	current.Entries = append(current.Entries, manifest.Entry{Path: logical, Source: source})
+	mustSaveManifest(t, environment, current)
+
+	result, err := environment.service.Apply(nil)
+	if !errors.Is(err, app.ErrProtectedLocalState) {
+		t.Fatalf("Apply(state case alias) error = %v, want ErrProtectedLocalState", err)
+	}
+	assertStrings(t, result.Applied, nil)
+	assertFileContents(t, environment.store.Path(), stateBefore)
+}
+
+func TestApplyRejectsHardLinkedLocalStateDestination(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  func(*testEnvironment) string
+		prepare func(*testing.T, string)
+	}{
+		{
+			name:   "state file",
+			target: func(environment *testEnvironment) string { return environment.store.Path() },
+		},
+		{
+			name: "state lock",
+			target: func(environment *testEnvironment) string {
+				return filepath.Join(environment.store.Directory(), "lock")
+			},
+		},
+		{
+			name: "state staging file",
+			target: func(environment *testEnvironment) string {
+				return filepath.Join(environment.store.Directory(), ".state-orphan.tmp")
+			},
+			prepare: func(t *testing.T, target string) {
+				mustWriteFile(t, target, []byte("orphaned local state staging data\n"), 0o600)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment := newTestEnvironment(t, testEnvironmentOptions{})
+			target := test.target(environment)
+			if test.prepare != nil {
+				test.prepare(t, target)
+			}
+			targetBefore := mustReadFile(t, target)
+			stateBefore := mustReadFile(t, environment.store.Path())
+
+			aliasDirectory := filepath.Join(environment.home, "state-aliases")
+			if err := os.MkdirAll(aliasDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			alias := filepath.Join(aliasDirectory, "protected-copy")
+			if err := os.Link(target, alias); err != nil {
+				t.Skipf("hard links are unavailable: %v", err)
+			}
+			logical, err := environment.resolver.Normalize(alias)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err := manifest.SourceFor(logical, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current := mustLoadManifest(t, environment)
+			current.Entries = append(current.Entries, manifest.Entry{Path: logical, Source: source})
+			mustSaveManifest(t, environment, current)
+			manifestPath := filepath.Join(environment.repository, manifest.Filename)
+			manifestBefore := mustReadFile(t, manifestPath)
+
+			result, err := environment.service.Apply(nil)
+			if !errors.Is(err, app.ErrProtectedLocalState) {
+				t.Fatalf("Apply(hard-link destination) error = %v, want ErrProtectedLocalState", err)
+			}
+			assertStrings(t, result.Applied, nil)
+			assertStrings(t, result.Skipped, nil)
+			assertFileContents(t, manifestPath, manifestBefore)
+			assertFileContents(t, environment.store.Path(), stateBefore)
+			assertFileContents(t, target, targetBefore)
+			assertFileContents(t, alias, targetBefore)
+		})
+	}
+}
+
+func TestApplySkipsExcludedLocalStateDestination(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "linux"})
+	destination := mustWriteFile(t, filepath.Join(environment.home, ".restore"), []byte("stored\n"), 0o644)
+	if _, err := environment.service.Add([]string{destination}, app.AddOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	excludedSensitive := mustWriteFile(t, filepath.Join(environment.home, ".excluded-secret"), []byte("stored secret\n"), 0o600)
+	if _, err := environment.service.Add([]string{excludedSensitive}, app.AddOptions{
+		Sensitive:        true,
+		ExcludePlatforms: []string{"linux"},
+		Password:         recordingPasswordProvider(testPassword, nil),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(destination); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, excludedSensitive, []byte("local excluded secret must remain\n"), 0o600)
+	stateBefore := mustReadFile(t, environment.store.Path())
+
+	protectedLogical, err := environment.resolver.Normalize(environment.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedSource, err := manifest.SourceFor(protectedLogical, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := mustLoadManifest(t, environment)
+	current.Entries = append(current.Entries, manifest.Entry{
+		Path: protectedLogical, Source: protectedSource, Sensitive: true, ExcludePlatforms: []string{"linux"},
+	})
+	mustSaveManifest(t, environment, current)
+	assertPathDoesNotExist(t, filepath.Join(environment.repository, filepath.FromSlash(protectedSource)))
+
+	var passwordCalls []bool
+	result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &passwordCalls))
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	assertStrings(t, result.Applied, []string{"~/.restore"})
+	assertStrings(t, result.Skipped, []string{"~/.excluded-secret", protectedLogical})
+	assertPasswordCalls(t, passwordCalls, nil)
+	assertFileContents(t, destination, []byte("stored\n"))
+	assertFileContents(t, excludedSensitive, []byte("local excluded secret must remain\n"))
+	assertFileContents(t, environment.store.Path(), stateBefore)
+}
+
+func TestRemoveCleansLegacyLocalStateEntryWithoutChangingBinding(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	stateBefore := mustReadFile(t, environment.store.Path())
+	protectedLogical, err := environment.resolver.Normalize(environment.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedSource, err := manifest.SourceFor(protectedLogical, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := mustWriteFile(
+		t,
+		filepath.Join(environment.repository, filepath.FromSlash(protectedSource)),
+		[]byte("legacy repository binding\n"),
+		0o644,
+	)
+	current := mustLoadManifest(t, environment)
+	current.Entries = append(current.Entries, manifest.Entry{Path: protectedLogical, Source: protectedSource})
+	mustSaveManifest(t, environment, current)
+
+	entries, err := environment.service.List()
+	if err != nil {
+		t.Fatalf("List() legacy entry error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Path != protectedLogical {
+		t.Fatalf("List() legacy entries = %+v, want %q", entries, protectedLogical)
+	}
+	var output bytes.Buffer
+	if err := environment.service.Show(protectedLogical, &output, nil); err != nil {
+		t.Fatalf("Show() legacy entry error = %v", err)
+	}
+	if got, want := output.String(), "legacy repository binding\n"; got != want {
+		t.Fatalf("Show() legacy output = %q, want %q", got, want)
+	}
+	assertFileContents(t, environment.store.Path(), stateBefore)
+
+	result, err := environment.service.Remove([]string{protectedLogical})
+	if err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	assertStrings(t, result.Removed, []string{protectedLogical})
+	assertPathDoesNotExist(t, stored)
+	assertFileContents(t, environment.store.Path(), stateBefore)
+	assertStrings(t, managedPaths(t, environment.service), nil)
+}
+
 func TestApplyDoesNotEscapeThroughDestinationParentSymlink(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{})
 	destination := mustWriteFile(t, filepath.Join(environment.home, "redirect", "victim"), []byte("managed\n"), 0o644)
@@ -932,6 +1539,13 @@ func mustLoadManifest(t *testing.T, environment *testEnvironment) manifest.Manif
 		t.Fatalf("load manifest: %v", err)
 	}
 	return current
+}
+
+func mustSaveManifest(t *testing.T, environment *testEnvironment, current manifest.Manifest) {
+	t.Helper()
+	if err := manifest.Save(filepath.Join(environment.repository, manifest.Filename), current); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
 }
 
 func mustFindEntry(t *testing.T, current manifest.Manifest, logical string) manifest.Entry {

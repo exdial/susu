@@ -25,7 +25,7 @@ For entries marked `sensitive`, the implementation aims to:
 8. confine managed source and destination operations beneath validated filesystem roots without following symlink components; and
 9. use atomic per-file installation or replacement so ordinary write failures do not expose partially written final files.
 
-These goals concern `susu`'s own behavior. They do not make a compromised host, untrusted Git state, plaintext destination, or weak password safe.
+Independently of entry sensitivity, the active private `susu` state directory is a protected local control root: `add` cannot capture it through an exact, descendant, ancestor, canonical, physical, case, or hard-linked protected-file alias, and `apply` cannot target it. These goals concern `susu`'s own behavior. They do not make a compromised host, untrusted Git state, plaintext destination, or weak password safe.
 
 ## Assets and trust boundaries
 
@@ -48,7 +48,8 @@ The relevant trust boundaries are:
 | Git executable and environment | Trusted for worktree validation and lock placement. `git` is resolved through `PATH` and inherits variables such as `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_COMMON_DIR`, which can redirect Git's interpretation of repository paths. |
 | Local host, kernel, runtime, and binary | Trusted while a password, key, or plaintext is in use. A process with equivalent privileges can generally read or alter the same data. |
 | `/dev/tty` | Trusted for no-echo password entry. A compromised terminal, keylogger, or TTY owner remains able to capture input. |
-| `HOME` and `XDG_CONFIG_HOME` | Authorized plaintext roots. `apply` is expected to create usable plaintext files there. |
+| `HOME` and `XDG_CONFIG_HOME` | Authorized plaintext roots. `apply` is expected to create usable plaintext files there, except beneath the active private `susu` state directory. |
+| Local `susu` state directory | Protected control root containing the active binding, local lock, and state staging files. Applicable `apply` destinations and `add` overlaps detected during input validation or discovery are rejected before password processing. After an optional `add` password callback, every new candidate is reopened and checked before any candidate content or repository source is written; each source descriptor is checked again before its own read. |
 | Filesystem and random source | Expected to implement the requested Unix permission, descriptor, rename, link, sync, and cryptographic-randomness semantics correctly. |
 | Git transport, signing, review, and history | Outside `susu`; Git and the operator remain responsible for them. |
 
@@ -71,7 +72,7 @@ Under those assumptions:
 - repository possession permits offline password guessing but not direct recovery of the password or master key; and
 - replaying an older valid encrypted file at the **same** logical path, or replaying an older coherent repository snapshot, is not detected.
 
-Repository modification is not fully contained by file encryption. An attacker can alter unsigned manifest policy, remove entries, change platform exclusions, or provide attacker-chosen public entries. In particular, an untrusted manifest plus public source can direct `apply` to write attacker-controlled plaintext anywhere representable within the permitted `HOME` or `XDG_CONFIG_HOME` roots. There is no denylist for an active repository, `.git`, local state, locks, or other control files located beneath those roots. Authenticate and review repository state before applying it.
+Repository modification is not fully contained by file encryption. An attacker can alter unsigned manifest policy, remove entries, change platform exclusions, or provide attacker-chosen public entries. In particular, an untrusted manifest plus public source can direct `apply` to write attacker-controlled plaintext to representable locations within the permitted `HOME` or `XDG_CONFIG_HOME` roots, except the active private `susu` state directory. Applicable destinations overlapping that directory are rejected before password prompting or repository-source access. There is still no denylist for an active repository, `.git`, or other control files located beneath those roots. Authenticate and review repository state before applying it.
 
 ## Explicit non-goals
 
@@ -81,7 +82,7 @@ Repository modification is not fully contained by file encryption. An attacker c
 - protection from malware, debuggers, keyloggers, same-user processes, a compromised binary, kernel, terminal, or hardware;
 - confidentiality for original source files, applied destinations, backups or snapshots of those locations, or intentional `show` output;
 - repository-wide signatures, a manifest MAC, public-file authentication, trusted-remote verification, or Git commit verification;
-- an ignore or denylist that automatically protects the `susu` repository, Git, state, lock, or staging paths from recursive `add` or manifest-directed `apply`;
+- a general ignore or denylist that protects the `susu` repository, Git, or arbitrary control and staging paths from recursive `add` or manifest-directed `apply`; the active private `susu` state directory is the explicit exception;
 - rollback, replay, deletion, or availability protection;
 - metadata, filename, directory-shape, file-length, access-pattern, or timing privacy;
 - automatic secret detection or validation that a file was classified correctly;
@@ -294,7 +295,7 @@ After structural validation, AES-GCM authentication must succeed with the reposi
 | `apply` with applicable sensitive entries | One unlock prompt for the invocation | Authenticates and decrypts all applicable sensitive files in memory during preflight, then writes each through a same-directory plaintext staging file to its destination. |
 | `rm` | No prompt | Removes the manifest entry and unlinks its repository source after the manifest transition; it does not decrypt or remove the destination. |
 
-Platform exclusions are evaluated before deciding whether `apply` needs a password. If every sensitive entry is excluded on the running platform, no unlock occurs.
+Platform exclusions are evaluated before deciding whether `apply` needs a password. After filtering, every applicable destination is checked against the active private `susu` state directory. A protected destination fails before repository-source access or password prompting. If every sensitive entry is excluded on the running platform, no unlock occurs.
 
 ### `show`
 
@@ -307,11 +308,11 @@ Sensitive `show` completes envelope parsing and GCM authentication before sendin
 Before changing any destination, `apply`:
 
 1. filters platform-excluded entries;
-2. unlocks once if needed;
-3. opens every applicable repository source as a regular file;
-4. checks repository-source size limits;
-5. fully authenticates and decrypts every applicable sensitive envelope;
-6. resolves every logical destination; and
+2. resolves every applicable logical destination and rejects canonical or physical overlap with the active private `susu` state directory;
+3. unlocks once if needed;
+4. opens every applicable repository source as a regular file;
+5. checks repository-source size limits;
+6. fully authenticates and decrypts every applicable sensitive envelope; and
 7. rejects exact lexical duplicates and ancestor/descendant destination-string conflicts.
 
 This prevents a wrong password or corrupted sensitive source from causing a half-applied invocation. Public source content is not cryptographically authenticated.
@@ -382,9 +383,9 @@ The descriptor that was checked is the descriptor that is read. Stable parent-di
 
 ### `add` input handling
 
-An explicitly supplied symlink or non-regular, non-directory object is rejected. While recursively walking a real directory, symlinks and non-regular objects are skipped rather than followed or read. Before reading a selected file, `susu` reopens it beneath its `HOME` or XDG root with the same no-follow, regular-file checks. This reduces time-of-check/time-of-use exposure between discovery and reading.
+An explicitly supplied symlink or non-regular, non-directory object is rejected. While recursively walking a real directory, symlinks and non-regular objects are skipped rather than followed or read. Before walking, `add` rejects an input that is inside the active private `susu` state directory, is the directory itself, or is an ancestor containing it. Canonical and physical aliases are included, and these direct overlaps fail before a sensitive password prompt. A hard-linked protected state file inside an otherwise unrelated tree is rejected during discovery. After any required password callback, `add` reopens and validates every new candidate before reading any candidate content or writing any repository source. A protected hard link substituted during password entry therefore fails command-wide rather than after an earlier candidate was processed. Before reading each selected file, `susu` reopens it beneath its `HOME` or XDG root with the same no-follow, regular-file checks and compares the opened descriptor with protected state-file identities captured under the state lock. A later protected replacement fails before that candidate's content is read or stored. These checks reduce time-of-check/time-of-use exposure between discovery and reading.
 
-Recursive collection has no ignore list. It can capture an active repository, `.git`, local state, lock files, or staging files when they are beneath the selected directory. Adding an ancestor of those locations can disclose local control data and can recursively ingest repository artifacts across repeated operations.
+Recursive collection has no general ignore list. It can still capture an active repository, `.git`, or repository/destination staging files when they are beneath the selected directory. Adding an ancestor of those unprotected locations can disclose control data and can recursively ingest repository artifacts across repeated operations.
 
 ### New repository sources
 
@@ -403,11 +404,11 @@ Sensitive sources are set to mode `0600`; public sources are normalized to `0644
 
 `susu.json` is written as a mode-`0644` same-directory temporary file, synced, atomically renamed into place, and followed by a repository-directory sync. If the rename succeeds but directory sync fails, the operation reports that the manifest was committed with uncertain durability and does not roll back newly installed sources.
 
-The local binding contains only the canonical repository path. Its directory is set to `0700`, its state and lock files to `0600`, and state replacement uses a synced same-directory temporary plus rename and directory sync. `init` rejects a state location that resolves physically or lexically inside the repository, including case aliases where the filesystem exposes them as the same object. A symlink used as the state file is rejected on load.
+The local binding contains only the canonical repository path. Its directory is set to `0700`, its state and lock files to `0600`, and state replacement uses a synced same-directory temporary plus rename and directory sync. `init` rejects a state location that resolves physically or lexically inside the repository, including case aliases where the filesystem exposes them as the same object. A symlink used as the state file is rejected on load. The entire private state directory is also excluded from managed inputs and applicable destinations. A legacy manifest entry targeting it fails before unlock or source access; `list`, `show`, and `rm` remain available so the entry can be inspected and removed.
 
 Source and destination content operations have the strongest descriptor-relative no-follow guarantees. Some top-level repository, manifest, and state setup or loading steps necessarily use pathname-based operating-system calls. An attacker able to rewrite these locations concurrently as the same user is outside the threat model.
 
-Filesystem confinement prevents traversal outside validated roots; it does not distinguish ordinary dotfiles from control files inside those roots. A manifest can therefore target the active repository, Git administrative data, or local state when those paths are representable under HOME/XDG.
+Filesystem confinement prevents traversal outside validated roots and the local-state overlap guard protects the active private `susu` state directory. Other ordinary dotfiles and control files are not distinguished. A manifest can therefore still target the active repository or Git administrative data when those paths are representable under HOME/XDG.
 
 ### Concurrency
 
@@ -485,7 +486,7 @@ For encrypted-envelope format version 1, the decoded `ciphertext` length is exac
 
 The salt, nonces, wrapped key, algorithms, and work factors are not secrets. Their disclosure is required for portable unlock and decryption. The wrapped key also gives an attacker a compact target for verifying offline password guesses without decrypting every file.
 
-The local state file is not committed by `susu`, is kept outside the repository, and is mode `0600`, but it reveals the active checkout's local absolute path to processes that can read it.
+The local state file is not committed by `susu`, is kept outside the repository, and is mode `0600`, but it reveals the active checkout's local absolute path to processes that can read it. New `add` operations cannot capture the active private state directory, and `apply` cannot overwrite it. A legacy repository or its Git history may still contain state data captured before this protection was introduced.
 
 ## Git history, provenance, and rollback
 
@@ -522,7 +523,7 @@ The repository master key is the compromise boundary. If it is disclosed, every 
 
 1. **Use `--sensitive` before the first commit.** Classification is manual. Verify that the manifest entry has `"sensitive": true`, the source is under `encrypted/`, and no plaintext copy exists under `public/` or elsewhere in the repository.
 2. **Use a strong, unique repository password.** Argon2id raises the cost of each guess but cannot compensate for a weak or reused password. Repository copies enable unlimited offline guessing.
-3. **Authenticate repository state before `apply`.** Review the commit, manifest changes, public files, Git provenance, and every destination. Decryptable sensitive files do not make an untrusted manifest or public source safe, and confinement does not prevent writes to repository, Git, or state files located under HOME/XDG.
+3. **Authenticate repository state before `apply`.** Review the commit, manifest changes, public files, Git provenance, and every destination. Decryptable sensitive files do not make an untrusted manifest or public source safe. The active private `susu` state directory is protected, but repository, Git, and other control paths under HOME/XDG are not.
 4. **Treat original and applied paths as plaintext storage.** Protect the account, permissions, ACLs, full-disk encryption, backups, snapshots, swap, and crash dumps according to the data's sensitivity.
 5. **Use `show` deliberately.** Plaintext goes to stdout and may be captured by redirection, pipelines, terminal history or recording, logs in downstream tools, or shoulder surfing.
 6. **Account for apply staging.** A sensitive `.susu-apply-*.tmp` file is mode `0600` but contains plaintext. After abnormal termination, inspect affected destination directories; a later `apply` removes matching stale entries. Do not use the reserved name pattern for unrelated files.
@@ -531,7 +532,7 @@ The repository master key is the compromise boundary. If it is disclosed, every 
 9. **Respond to accidental plaintext publication as a credential incident.** Remove or rewrite affected history where appropriate and rotate the exposed underlying credential; adding encryption afterward does not revoke disclosed data.
 10. **Respond to key or password compromise by retiring the old encrypted history.** The implementation has no in-place rotation or revocation mechanism, and old repository copies remain usable by an attacker who obtained the relevant key material.
 11. **Avoid concurrent external repository mutation.** Do not run checkout, merge, cleanup, or scripts that rewrite `susu.json`, `public/`, or `encrypted/` while a `susu` command is active.
-12. **Scope recursive adds narrowly.** Do not add an ancestor directory that contains the active repository, `.git`, the XDG state directory, or other control data. There is no automatic ignore list.
+12. **Scope recursive adds narrowly.** An input containing the active private `susu` state directory is rejected. Still avoid adding an ancestor directory that contains the active repository, `.git`, staging files, or other unprotected control data; there is no general automatic ignore list.
 13. **Use a trusted Git execution environment.** Ensure `git` from `PATH` is the expected binary and unset repository-selection variables such as `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_COMMON_DIR` unless their effect is explicitly intended.
 14. **Account for filesystem aliases.** On case-insensitive or normalization-insensitive filesystems, visually different logical paths can resolve to the same destination and be applied sequentially.
 15. **Do not hand-edit cryptographic metadata.** Unsupported versions, algorithms, lengths, or parameters fail closed, while accepted but inconsistent edits can make the repository permanently undecryptable.

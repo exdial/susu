@@ -65,6 +65,12 @@ func (s *Store) Path() string {
 	return s.path
 }
 
+// Directory returns the private directory containing state.json, the local
+// advisory lock, and any same-directory state staging files.
+func (s *Store) Directory() string {
+	return filepath.Dir(s.path)
+}
+
 // Save atomically replaces the binding with a canonical absolute repository
 // path. The susu state directory and state file are restricted to the user.
 func (s *Store) Save(repository string) error {
