@@ -32,7 +32,8 @@ var (
 
 // Repository is one validated, initialized susu repository.
 type Repository struct {
-	Root string
+	Root               string
+	gitCommonDirectory string
 }
 
 // Initialize validates an existing Git worktree root, creates storage
@@ -46,7 +47,10 @@ func Initialize(input string) (*Repository, error) {
 		return nil, err
 	}
 
-	repository := &Repository{Root: root}
+	repository, err := newRepository(root)
+	if err != nil {
+		return nil, err
+	}
 	release, err := repository.Lock()
 	if err != nil {
 		return nil, err
@@ -89,7 +93,10 @@ func Open(input string) (*Repository, error) {
 	if err := validateGitRoot(root); err != nil {
 		return nil, err
 	}
-	repository := &Repository{Root: root}
+	repository, err := newRepository(root)
+	if err != nil {
+		return nil, err
+	}
 	if err := repository.checkStorageDirectories(); err != nil {
 		return nil, err
 	}
@@ -104,6 +111,11 @@ func Open(input string) (*Repository, error) {
 		return nil, fmt.Errorf("%w: susu.json %q is not a regular file", manifest.ErrInvalidManifest, repository.ManifestPath())
 	}
 	return repository, nil
+}
+
+// GitCommonDirectory returns the canonical absolute Git common administrative directory.
+func (r *Repository) GitCommonDirectory() string {
+	return r.gitCommonDirectory
 }
 
 // ManifestPath returns the absolute susu.json path.
@@ -125,11 +137,7 @@ func (r *Repository) SaveManifest(value manifest.Manifest) error {
 // regardless of which local XDG state directory is bound to it. The lock lives
 // in Git's common administrative directory and is never part of the worktree.
 func (r *Repository) Lock() (func() error, error) {
-	commonDirectory, err := gitCommonDirectory(r.Root)
-	if err != nil {
-		return nil, err
-	}
-	directory, leaf, err := safefs.OpenParent(commonDirectory, "susu.lock", false, 0)
+	directory, leaf, err := safefs.OpenParent(r.gitCommonDirectory, "susu.lock", false, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open Git common directory lock path: %w", err)
 	}
@@ -448,17 +456,19 @@ func canonicalExistingDirectory(input string, configured bool) (string, error) {
 	return canonical, nil
 }
 
-func gitCommonDirectory(root string) (string, error) {
-	command := exec.Command("git", "-C", root, "rev-parse", "--git-common-dir")
-	output, err := command.CombinedOutput()
+func newRepository(root string) (*Repository, error) {
+	commonDirectory, err := gitCommonDirectory(root)
 	if err != nil {
-		detail := strings.TrimSpace(string(output))
-		if detail == "" {
-			detail = err.Error()
-		}
-		return "", fmt.Errorf("locate Git common directory for %q: %s", root, detail)
+		return nil, err
 	}
-	common := strings.TrimSpace(string(output))
+	return &Repository{Root: root, gitCommonDirectory: commonDirectory}, nil
+}
+
+func gitCommonDirectory(root string) (string, error) {
+	common, err := gitRevParsePath(root, "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("locate Git common directory for %q: %w", root, err)
+	}
 	if !filepath.IsAbs(common) {
 		common = filepath.Join(root, common)
 	}
@@ -470,16 +480,10 @@ func gitCommonDirectory(root string) (string, error) {
 }
 
 func validateGitRoot(root string) error {
-	command := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel")
-	output, err := command.CombinedOutput()
+	gitRootText, err := gitRevParsePath(root, "--show-toplevel")
 	if err != nil {
-		detail := strings.TrimSpace(string(output))
-		if detail == "" {
-			detail = err.Error()
-		}
-		return fmt.Errorf("Git repository validation failed for %q: %s", root, detail)
+		return fmt.Errorf("Git repository validation failed for %q: %w", root, err)
 	}
-	gitRootText := strings.TrimSpace(string(output))
 	gitRoot, err := canonicalExistingDirectory(gitRootText, false)
 	if err != nil {
 		return fmt.Errorf("resolve Git repository root %q: %w", gitRootText, err)
@@ -488,4 +492,41 @@ func validateGitRoot(root string) error {
 		return fmt.Errorf("%w: supplied %q, Git root is %q", ErrNotGitRoot, root, gitRoot)
 	}
 	return nil
+}
+
+func gitRevParsePath(root, option string) (string, error) {
+	var stdout strings.Builder
+	var stderr strings.Builder
+	command := exec.Command("git", "-C", root, "rev-parse", option)
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		return "", errors.New(detail)
+	}
+	value, err := parseGitPathRecord(stdout.String())
+	if err != nil {
+		return "", fmt.Errorf("parse git rev-parse %s output: %w", option, err)
+	}
+	return value, nil
+}
+
+func parseGitPathRecord(output string) (string, error) {
+	if output == "" {
+		return "", errors.New("Git returned empty path output")
+	}
+	if !strings.HasSuffix(output, "\n") {
+		return "", errors.New("Git path output is missing its record terminator")
+	}
+	record := strings.TrimSuffix(output, "\n")
+	if record == "" {
+		return "", errors.New("Git returned an empty path record")
+	}
+	if strings.Contains(record, "\n") {
+		return "", errors.New("Git returned multiple or malformed path records")
+	}
+	return record, nil
 }

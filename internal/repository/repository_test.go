@@ -123,6 +123,194 @@ func TestInitializeAcceptsExactGitRootAndCreatesFiles(t *testing.T) {
 	}
 }
 
+func TestGitCommonDirectoryForNormalRepository(t *testing.T) {
+	root := initGitRepository(t)
+	repository := mustInitializeRepository(t, root)
+	want := canonicalPath(t, filepath.Join(root, ".git"))
+	if got := repository.GitCommonDirectory(); got != want {
+		t.Fatalf("Initialize().GitCommonDirectory() = %q, want %q", got, want)
+	}
+	assertRegularFile(t, filepath.Join(want, "susu.lock"))
+
+	opened, err := Open(repository.Root)
+	if err != nil {
+		t.Fatalf("Open(%q) error = %v", repository.Root, err)
+	}
+	if got := opened.GitCommonDirectory(); got != want {
+		t.Fatalf("Open().GitCommonDirectory() = %q, want %q", got, want)
+	}
+}
+
+func TestGitRootEndingInSpace(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "repository ending in space ")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, "init", "--quiet", root)
+
+	repository := mustInitializeRepository(t, root)
+	wantRoot := canonicalPath(t, root)
+	if !strings.HasSuffix(wantRoot, " ") {
+		t.Fatalf("canonical fixture root %q does not end in a space", wantRoot)
+	}
+	if repository.Root != wantRoot {
+		t.Fatalf("Initialize().Root = %q, want trailing-space root %q", repository.Root, wantRoot)
+	}
+	wantCommonDirectory := canonicalPath(t, filepath.Join(root, ".git"))
+	if got := repository.GitCommonDirectory(); got != wantCommonDirectory {
+		t.Fatalf("Initialize().GitCommonDirectory() = %q, want %q", got, wantCommonDirectory)
+	}
+	assertRegularFile(t, filepath.Join(wantCommonDirectory, "susu.lock"))
+
+	opened, err := Open(repository.Root)
+	if err != nil {
+		t.Fatalf("Open(%q) error = %v", repository.Root, err)
+	}
+	if opened.Root != wantRoot {
+		t.Fatalf("Open().Root = %q, want trailing-space root %q", opened.Root, wantRoot)
+	}
+	if got := opened.GitCommonDirectory(); got != wantCommonDirectory {
+		t.Fatalf("Open().GitCommonDirectory() = %q, want %q", got, wantCommonDirectory)
+	}
+}
+
+func TestGitCommonDirectoryEndingInSpace(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, "worktree")
+	commonDirectory := filepath.Join(root, "separate Git directory ")
+	runGit(t, "init", "--quiet", "--separate-git-dir", commonDirectory, worktree)
+	assertRegularFile(t, filepath.Join(worktree, ".git"))
+
+	repository := mustInitializeRepository(t, worktree)
+	want := canonicalPath(t, commonDirectory)
+	if !strings.HasSuffix(want, " ") {
+		t.Fatalf("canonical fixture common directory %q does not end in a space", want)
+	}
+	if got := repository.GitCommonDirectory(); got != want {
+		t.Fatalf("Initialize().GitCommonDirectory() = %q, want trailing-space directory %q", got, want)
+	}
+	assertRegularFile(t, filepath.Join(want, "susu.lock"))
+
+	opened, err := Open(repository.Root)
+	if err != nil {
+		t.Fatalf("Open(%q) error = %v", repository.Root, err)
+	}
+	if got := opened.GitCommonDirectory(); got != want {
+		t.Fatalf("Open().GitCommonDirectory() = %q, want trailing-space directory %q", got, want)
+	}
+}
+
+func TestParseGitPathRecord(t *testing.T) {
+	tests := []struct {
+		name    string
+		output  string
+		want    string
+		wantErr bool
+	}{
+		{name: "newline preserves trailing space", output: "/tmp/repository \n", want: "/tmp/repository "},
+		{name: "carriage return is preserved as path data", output: "/tmp/repository \r\n", want: "/tmp/repository \r"},
+		{name: "empty output", output: "", wantErr: true},
+		{name: "empty record", output: "\n", wantErr: true},
+		{name: "carriage-return-only path", output: "\r\n", want: "\r"},
+		{name: "missing terminator", output: "/tmp/repository ", wantErr: true},
+		{name: "multiple records", output: "/tmp/one\n/tmp/two\n", wantErr: true},
+		{name: "embedded carriage return is preserved", output: "/tmp/one\r/tmp/two\n", want: "/tmp/one\r/tmp/two"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseGitPathRecord(test.output)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("parseGitPathRecord(%q) = %q, want error", test.output, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseGitPathRecord(%q) error = %v", test.output, err)
+			}
+			if got != test.want {
+				t.Fatalf("parseGitPathRecord(%q) = %q, want %q", test.output, got, test.want)
+			}
+		})
+	}
+}
+
+func TestGitCommonDirectoryForLinkedWorktree(t *testing.T) {
+	primaryRoot, linkedRoot := initLinkedGitWorktree(t)
+	linkedGitFile := filepath.Join(linkedRoot, ".git")
+	assertRegularFile(t, linkedGitFile)
+
+	primaryRepository := mustInitializeRepository(t, primaryRoot)
+	linkedRepository := mustInitializeRepository(t, linkedRoot)
+	openedLinked, err := Open(linkedRepository.Root)
+	if err != nil {
+		t.Fatalf("Open(%q) error = %v", linkedRepository.Root, err)
+	}
+
+	want := canonicalPath(t, filepath.Join(primaryRoot, ".git"))
+	for name, repository := range map[string]*Repository{
+		"primary Initialize": primaryRepository,
+		"linked Initialize":  linkedRepository,
+		"linked Open":        openedLinked,
+	} {
+		if got := repository.GitCommonDirectory(); got != want {
+			t.Fatalf("%s GitCommonDirectory() = %q, want shared directory %q", name, got, want)
+		}
+	}
+	assertRegularFile(t, filepath.Join(want, "susu.lock"))
+
+	linkedGitDirectory, err := parseGitPathRecord(string(runGit(t, "-C", linkedRoot, "rev-parse", "--git-dir")))
+	if err != nil {
+		t.Fatalf("parse linked worktree Git directory: %v", err)
+	}
+	if !filepath.IsAbs(linkedGitDirectory) {
+		linkedGitDirectory = filepath.Join(linkedRoot, linkedGitDirectory)
+	}
+	linkedGitDirectory = canonicalPath(t, linkedGitDirectory)
+	if linkedGitDirectory == want {
+		t.Fatalf("linked worktree Git directory = common directory %q; fixture is not linked", want)
+	}
+	if _, err := os.Lstat(filepath.Join(linkedGitDirectory, "susu.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("linked per-worktree Git directory contains susu.lock: %v", err)
+	}
+}
+
+func TestLockReusesRetainedGitCommonDirectory(t *testing.T) {
+	initialized := mustInitializeRepository(t, initGitRepository(t))
+	repository, err := Open(initialized.Root)
+	if err != nil {
+		t.Fatalf("Open(%q) error = %v", initialized.Root, err)
+	}
+	commonDirectory := repository.GitCommonDirectory()
+	lockPath := filepath.Join(commonDirectory, "susu.lock")
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatalf("remove existing repository lock: %v", err)
+	}
+
+	emptyPath := filepath.Join(t.TempDir(), "empty-path")
+	if err := os.Mkdir(emptyPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", emptyPath)
+	if git, err := exec.LookPath("git"); err == nil {
+		t.Fatalf("git remains available at %q after isolating PATH", git)
+	}
+
+	release, err := repository.Lock()
+	if err != nil {
+		t.Fatalf("Lock() with git unavailable error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := release(); err != nil {
+			t.Errorf("release repository lock: %v", err)
+		}
+	})
+	assertRegularFile(t, lockPath)
+	if got := repository.GitCommonDirectory(); got != commonDirectory {
+		t.Fatalf("GitCommonDirectory() after Lock() = %q, want retained %q", got, commonDirectory)
+	}
+}
+
 func TestInitializeCanonicalizesSymlinkRoot(t *testing.T) {
 	root := initGitRepository(t)
 	link := filepath.Join(t.TempDir(), "repository-link")
@@ -393,11 +581,56 @@ func initGitRepository(t *testing.T) string {
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(requireGit(t), "init", "--quiet", root)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("git init %q: %v\n%s", root, err, output)
-	}
+	runGit(t, "init", "--quiet", root)
 	return root
+}
+
+func initLinkedGitWorktree(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "global-gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	primary := filepath.Join(root, "primary repository with spaces")
+	linked := filepath.Join(root, "linked worktree with spaces")
+	runGit(t, "init", "--quiet", primary)
+	runGit(
+		t,
+		"-C", primary,
+		"-c", "user.name=susu-tests",
+		"-c", "user.email=susu-tests@example.invalid",
+		"-c", "commit.gpgSign=false",
+		"commit", "--quiet", "--allow-empty", "-m", "linked worktree fixture",
+	)
+	runGit(t, "-C", primary, "worktree", "add", "--detach", linked, "HEAD")
+	return primary, linked
+}
+
+func runGit(t *testing.T, arguments ...string) []byte {
+	t.Helper()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	command := exec.Command(requireGit(t), arguments...)
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		t.Fatalf("git %s: %s", strings.Join(arguments, " "), detail)
+	}
+	return stdout.Bytes()
+}
+
+func assertRegularFile(t *testing.T, filename string) {
+	t.Helper()
+	info, err := os.Lstat(filename)
+	if err != nil {
+		t.Fatalf("Lstat(%q): %v", filename, err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("%q mode = %v, want a regular file", filename, info.Mode())
+	}
 }
 
 func mustInitializeRepository(t *testing.T, root string) *Repository {
