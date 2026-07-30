@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/images/susu-logo.png" alt="susu logo: a soot sprite carrying a terminal prompt" width="280">
+</p>
+
 # susu
 
 `susu` is a small Unix CLI for keeping selected dotfiles in a Git repository and restoring them on another machine. Public files are stored as ordinary snapshots; files added with `--sensitive` are encrypted before they enter the repository.
@@ -94,3 +98,7 @@ Small files. Small tool. One job.
 - [Security](docs/security.md) — encryption design, threat model, operational guidance, and audit status.
 - [Design and architecture](docs/design.md) — components, data flow, locking, and filesystem guarantees.
 - [Changelog](CHANGELOG.md) — version-specific changes.
+
+## License
+
+`susu` is available under the [MIT License](LICENSE).
