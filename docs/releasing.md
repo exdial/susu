@@ -17,8 +17,8 @@ GitHub releases are created automatically from semantic-version tags by [the rel
 Create and push a semantic-version tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 Tags with a semantic-version prerelease suffix, such as `v0.2.0-rc.1`, produce GitHub prereleases. Other `v*` tags are accepted by the workflow trigger but may be rejected by GoReleaser if they are not valid release versions.
