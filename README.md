@@ -4,6 +4,7 @@
 
 # susu
 
+[![CI](https://github.com/exdial/susu/actions/workflows/ci.yml/badge.svg)](https://github.com/exdial/susu/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/exdial/susu)](https://github.com/exdial/susu/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
