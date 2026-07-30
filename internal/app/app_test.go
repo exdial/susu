@@ -568,6 +568,7 @@ func TestAddRejectsRepositoryPathsBeforePasswordOrMutation(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{repositoryUnderHome: true, customXDG: true})
 	const stagingSuffix = "0123456789abcdef01234567"
 	manifestPath := filepath.Join(environment.repository, manifest.Filename)
+	manifestInput := filepath.Join(environment.repositoryInput, manifest.Filename)
 	repositoryLock := filepath.Join(environment.gitCommonDirectory, "susu.lock")
 	stagingFiles := map[string][]byte{
 		filepath.Join(environment.repository, ".susu-123456789.tmp"):                       []byte("manifest staging sentinel\n"),
@@ -588,15 +589,15 @@ func TestAddRejectsRepositoryPathsBeforePasswordOrMutation(t *testing.T) {
 		input string
 	}{
 		{name: "exact worktree", input: environment.repositoryInput},
-		{name: "manifest", input: manifestPath},
-		{name: "public storage", input: filepath.Join(environment.repository, "public")},
-		{name: "encrypted storage", input: filepath.Join(environment.repository, "encrypted")},
+		{name: "manifest", input: manifestInput},
+		{name: "public storage", input: filepath.Join(environment.repositoryInput, "public")},
+		{name: "encrypted storage", input: filepath.Join(environment.repositoryInput, "encrypted")},
 		{name: "Git directory", input: environment.gitCommonDirectory},
 		{name: "repository lock", input: repositoryLock},
-		{name: "manifest staging file", input: filepath.Join(environment.repository, ".susu-123456789.tmp")},
-		{name: "add staging file", input: filepath.Join(environment.repository, "public", ".susu-add-"+stagingSuffix+".tmp")},
-		{name: "apply staging file", input: filepath.Join(environment.repository, ".susu-apply-"+stagingSuffix+".tmp")},
-		{name: "representable ancestor", input: filepath.Dir(environment.repository)},
+		{name: "manifest staging file", input: filepath.Join(environment.repositoryInput, ".susu-123456789.tmp")},
+		{name: "add staging file", input: filepath.Join(environment.repositoryInput, "public", ".susu-add-"+stagingSuffix+".tmp")},
+		{name: "apply staging file", input: filepath.Join(environment.repositoryInput, ".susu-apply-"+stagingSuffix+".tmp")},
+		{name: "representable ancestor", input: filepath.Dir(environment.repositoryInput)},
 	}
 
 	for _, test := range tests {
@@ -627,7 +628,7 @@ func TestAddRejectsRepositoryPathsBeforePasswordOrMutation(t *testing.T) {
 func TestAddAllowsSiblingOutsideRepository(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{repositoryUnderHome: true, customXDG: true})
 	contents := []byte("nearby repository sibling\n")
-	destination := mustWriteFile(t, filepath.Join(environment.repository+"-sibling", "config"), contents, 0o644)
+	destination := mustWriteFile(t, filepath.Join(environment.repositoryInput+"-sibling", "config"), contents, 0o644)
 	entry := mustEntryForDestination(t, environment, destination, false)
 
 	result, err := environment.service.Add([]string{destination}, app.AddOptions{})
@@ -664,7 +665,7 @@ func TestAddRejectsRepositorySymlinkAndCaseAliases(t *testing.T) {
 	})
 
 	t.Run("case alias", func(t *testing.T) {
-		alias := filepath.Join(filepath.Dir(environment.repository), strings.ToUpper(filepath.Base(environment.repository)))
+		alias := filepath.Join(filepath.Dir(environment.repositoryInput), strings.ToUpper(filepath.Base(environment.repositoryInput)))
 		repositoryInfo, err := os.Stat(environment.repository)
 		if err != nil {
 			t.Fatal(err)
@@ -1469,6 +1470,7 @@ func TestApplyRejectsRepositoryDestinationsBeforePasswordSourceOrMutation(t *tes
 
 	const stagingSuffix = "0123456789abcdef01234567"
 	manifestPath := filepath.Join(environment.repository, manifest.Filename)
+	manifestInput := filepath.Join(environment.repositoryInput, manifest.Filename)
 	repositoryLock := filepath.Join(environment.gitCommonDirectory, "susu.lock")
 	controlFiles := map[string][]byte{
 		repositoryLock: []byte("repository lock sentinel\n"),
@@ -1485,15 +1487,15 @@ func TestApplyRejectsRepositoryDestinationsBeforePasswordSourceOrMutation(t *tes
 		destination string
 	}{
 		{name: "exact worktree", destination: environment.repositoryInput},
-		{name: "manifest", destination: manifestPath},
-		{name: "public storage", destination: filepath.Join(environment.repository, "public")},
-		{name: "encrypted storage", destination: filepath.Join(environment.repository, "encrypted")},
+		{name: "manifest", destination: manifestInput},
+		{name: "public storage", destination: filepath.Join(environment.repositoryInput, "public")},
+		{name: "encrypted storage", destination: filepath.Join(environment.repositoryInput, "encrypted")},
 		{name: "Git directory", destination: environment.gitCommonDirectory},
 		{name: "repository lock", destination: repositoryLock},
-		{name: "manifest staging file", destination: filepath.Join(environment.repository, ".susu-123456789.tmp")},
-		{name: "add staging file", destination: filepath.Join(environment.repository, "public", ".susu-add-"+stagingSuffix+".tmp")},
-		{name: "apply staging file", destination: filepath.Join(environment.repository, ".susu-apply-"+stagingSuffix+".tmp")},
-		{name: "representable ancestor", destination: filepath.Dir(environment.repository)},
+		{name: "manifest staging file", destination: filepath.Join(environment.repositoryInput, ".susu-123456789.tmp")},
+		{name: "add staging file", destination: filepath.Join(environment.repositoryInput, "public", ".susu-add-"+stagingSuffix+".tmp")},
+		{name: "apply staging file", destination: filepath.Join(environment.repositoryInput, ".susu-apply-"+stagingSuffix+".tmp")},
+		{name: "representable ancestor", destination: filepath.Dir(environment.repositoryInput)},
 	}
 
 	for _, test := range tests {
@@ -1557,7 +1559,7 @@ func TestApplyRejectsRepositorySymlinkAndCaseAliases(t *testing.T) {
 	})
 
 	t.Run("case alias", func(t *testing.T) {
-		alias := filepath.Join(filepath.Dir(environment.repository), strings.ToUpper(filepath.Base(environment.repository)))
+		alias := filepath.Join(filepath.Dir(environment.repositoryInput), strings.ToUpper(filepath.Base(environment.repositoryInput)))
 		repositoryInfo, err := os.Stat(environment.repository)
 		if err != nil {
 			t.Fatal(err)
@@ -1681,7 +1683,7 @@ func TestApplySkipsExcludedSensitiveRepositoryDestination(t *testing.T) {
 	}
 	base := mustLoadManifest(t, environment)
 	publicEntry := mustFindEntry(t, base, "~/.restore-outside-repository")
-	protectedEntry := mustEntryForDestination(t, environment, filepath.Join(environment.repository, manifest.Filename), true)
+	protectedEntry := mustEntryForDestination(t, environment, filepath.Join(environment.repositoryInput, manifest.Filename), true)
 	protectedEntry.ExcludePlatforms = []string{"linux"}
 	current := manifest.New()
 	current.Crypto = base.Crypto
@@ -1712,7 +1714,7 @@ func TestLegacyRepositoryEntrySupportsListShowAndRemoveWithoutChangingDestinatio
 	environment := newTestEnvironment(t, testEnvironmentOptions{repositoryUnderHome: true, customXDG: true})
 	destinationContents := []byte("protected destination must remain\n")
 	storedContents := []byte("legacy stored snapshot\n")
-	destination := mustWriteFile(t, filepath.Join(environment.repository, "legacy-protected-destination"), destinationContents, 0o644)
+	destination := mustWriteFile(t, filepath.Join(environment.repositoryInput, "legacy-protected-destination"), destinationContents, 0o644)
 	entry := mustEntryForDestination(t, environment, destination, false)
 	stored := mustWriteFile(
 		t,
