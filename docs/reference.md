@@ -195,7 +195,7 @@ A sensitive directory is expanded into individually encrypted file entries. Sens
 
 There is one password and one random 32-byte master key per repository. On the first sensitive operation, `susu` asks for the password and confirmation using a TTY with echo disabled, creates the encryption metadata, and encrypts the input. Later sensitive operations unlock the same master key with one password prompt per invocation. There is no password or key cache.
 
-See [`security.md`](security.md) for the encryption design and threat model.
+See the [encryption and security model](security-model.md) for the encryption design and threat model.
 
 ### Platform exclusions: `--exclude-platform`
 
@@ -274,7 +274,7 @@ susu apply
 
 Platform filtering and the first protected-destination check happen before repository-source access or a password prompt. Therefore an excluded protected entry is skipped normally, while an applicable destination that already overlaps a protected root aborts the invocation without changing any destination. If one or more remaining sensitive entries exist, the password is read once and the unlocked master key is reused only in that process. Every ciphertext is authenticated in memory before any destination is changed. All destinations are checked again after source preflight and individually before replacement, so a path redirected into a protected root during the invocation fails before it is written and no plaintext is created inside the repository or Git metadata.
 
-Portable atomic replacement on both macOS and Linux requires a short-lived, randomly named staging file next to the final destination. For sensitive entries it is created as `0600`, written only after authentication, synced, and atomically renamed. Normal failures remove it; a crash or power loss can leave a `.susu-apply-*.tmp` plaintext residue until a later `apply` cleans stale staging files. Atomicity is per destination: an I/O failure after earlier renames can leave those earlier files applied, and the CLI reports them before returning the error.
+Portable atomic replacement on both macOS and Linux requires a short-lived, randomly named staging file next to the final destination. For sensitive entries it is created as `0600`, written only after authentication, synced, and atomically renamed. Each replacement tracks only the exact staging name it created and makes a best-effort attempt to remove that name on ordinary failures before rename. A crash or power loss can leave a `.susu-apply-<24 hex characters>.tmp` plaintext residue. Later `apply` invocations do not delete it or any other neighboring staging-like file because ownership cannot be established safely; inspect and remove confirmed residue manually. Atomicity is per destination: an I/O failure after earlier renames can leave those earlier files applied, and the CLI reports them before returning the error.
 
 `apply` is a restore operation and can replace managed destination files. `susu` does not provide `status`, `diff`, automatic conflict handling, or backups, so review `susu list` and your repository changes before applying.
 
@@ -432,7 +432,7 @@ Commit the resulting manifest and storage with Git. After cloning and running `s
 - Public entries, logical paths, filenames, exclusions, and other manifest metadata are not encrypted.
 - Public permissions are normalized to `0644` or `0755`; arbitrary Unix mode bits are not preserved through Git.
 - An input file is limited to 512 MiB, a serialized repository source read by `show` or `apply` is limited to 1 GiB, and aggregate sensitive plaintext retained during `apply` preflight is limited to 1 GiB.
-- `apply` uses a same-directory staging file for atomic replacement; a process crash can leave a sensitive `0600` plaintext staging residue until a later `apply` cleans it.
+- `apply` uses a same-directory staging file for atomic replacement; a process crash can leave a sensitive `0600` plaintext staging residue that must be inspected and removed manually. Later `apply` invocations do not scavenge neighboring files by name.
 - Git operations are intentionally not automated. Use Git directly for commit, push, pull, merge, conflict resolution, and history management.
 
-For implementation boundaries and data flow, see [`design.md`](design.md). For cryptographic details and security limitations, see [`security.md`](security.md).
+For implementation boundaries and data flow, see [`design.md`](design.md). For cryptographic details and security limitations, see the [encryption and security model](security-model.md).

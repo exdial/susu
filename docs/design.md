@@ -52,7 +52,7 @@ The Go packages follow the operational boundaries rather than the command names 
 | `internal/safefs` | Descriptor-relative, no-follow open/create/link/rename/remove operations on macOS and Linux |
 | `internal/cryptox` | Repository-key initialization and unlock, encrypted-file envelopes, authentication, and crypto-format validation |
 
-Cryptographic construction, password handling, plaintext boundaries, and the threat model are described in [`security.md`](security.md). This document covers only the interfaces that affect the wider architecture.
+Cryptographic construction, password handling, plaintext boundaries, and the threat model are described in the [encryption and security model](security-model.md). This document covers only the interfaces that affect the wider architecture.
 
 ## Portable and machine-local state
 
@@ -365,12 +365,11 @@ Destination conflict checks resolve existing root ancestors, then compare exact 
 For each destination, `apply`:
 
 1. creates missing roots and parent directories;
-2. removes stale non-directory names matching `.susu-apply-*.tmp` in that destination directory;
-3. creates a random same-directory staging file with the final mode;
-4. writes and synchronizes the complete content;
-5. closes the staging file;
-6. atomically renames it over the destination; and
-7. synchronizes the destination directory.
+2. creates a random same-directory staging file with the final mode;
+3. writes and synchronizes the complete content;
+4. closes the staging file;
+5. atomically renames it over the destination; and
+6. synchronizes the destination directory.
 
 A leaf symlink is replaced by the rename rather than followed. A symlink in any component below the logical HOME/XDG root causes an error. Existing regular files are replaced without a local-change comparison or backup.
 
@@ -400,7 +399,7 @@ The source-first `add` ordering and manifest-first `rm` ordering favor orphaned 
 
 Consequently, corrupted sensitive data cannot produce a partially applied restore, but a filesystem failure or late public-source read failure can occur after earlier destinations were committed. The result reports committed paths, and the CLI prints those paths before returning a non-zero exit status. No command-wide rollback or destination backup is attempted.
 
-A normal staging failure removes the temporary destination file. A crash after sensitive plaintext is written but before cleanup can leave a `0600` `.susu-apply-*.tmp` file beside the destination. A later `apply` that reaches the same directory removes names in that reserved namespace. See [`security.md`](security.md) for the plaintext implications.
+On an ordinary staging failure before rename, `apply` makes a best-effort attempt to remove only the exact temporary name created for that replacement. A crash after sensitive plaintext is written but before cleanup can leave a `0600` `.susu-apply-<24 hex characters>.tmp` file beside the destination. Later invocations do not scan the directory or remove staging-like names because they cannot prove ownership; unrelated neighboring entries are preserved. Confirmed crash residue must be removed manually. See the [encryption and security model](security-model.md) for the plaintext implications.
 
 ## Locking and concurrency
 
@@ -466,7 +465,7 @@ The implemented model has these deliberate or practical limits:
 - Public mode portability is limited to non-executable versus executable; sensitive destinations are always `0600`.
 - `add` reads one complete input file into memory. Sensitive `show` reads and decrypts one complete envelope in memory. `apply` retains all applicable sensitive plaintext through preflight.
 - Input files are limited to 512 MiB. `apply` sources and sensitive `show` sources are limited to 1 GiB as described above; public `show` has no explicit size cap.
-- Destination atomicity relies on same-directory staging. Sensitive plaintext can remain in a crash-residue staging file, and the `.susu-apply-*.tmp` name pattern is reserved for cleanup.
+- Destination atomicity relies on same-directory staging. Sensitive plaintext can remain in a crash-residue staging file that requires manual cleanup; `apply` does not reserve or scavenge neighboring names matching its staging format.
 - New-source no-overwrite installation relies on same-directory hard links.
 - Advisory locking protects only cooperating local `susu` processes; it does not coordinate Git, manual edits, or remote machines.
-- Public content, logical paths, source paths, platform exclusions, and crypto metadata remain visible in the repository. Sensitive-content guarantees and their limits are covered in [`security.md`](security.md).
+- Public content, logical paths, source paths, platform exclusions, and crypto metadata remain visible in the repository. Sensitive-content guarantees and their limits are covered in the [encryption and security model](security-model.md).

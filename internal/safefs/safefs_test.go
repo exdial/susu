@@ -3,6 +3,7 @@
 package safefs
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -77,6 +78,33 @@ func TestStableParentDescriptorCannotBeRedirectedByPathSwap(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join(moved, "file"))
 	if err != nil || string(contents) != "stable" {
 		t.Fatalf("stable parent contents = %q, error = %v", contents, err)
+	}
+}
+
+func TestCreateTempExcludesDestinationNameBeforeCreation(t *testing.T) {
+	root := t.TempDir()
+	directory, _, err := OpenParent(root, "destination", false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+
+	const (
+		excluded = ".test-000000000000000000000000.tmp"
+		wantName = ".test-111111111111111111111111.tmp"
+	)
+	random := append(make([]byte, 12), bytes.Repeat([]byte{0x11}, 12)...)
+	file, name, err := directory.createTemp(".test-", 0o600, excluded, bytes.NewReader(random))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	defer directory.Remove(name)
+	if name != wantName {
+		t.Fatalf("temporary name = %q, want %q", name, wantName)
+	}
+	if _, err := os.Lstat(filepath.Join(root, excluded)); !os.IsNotExist(err) {
+		t.Fatalf("excluded destination name was created: %v", err)
 	}
 }
 

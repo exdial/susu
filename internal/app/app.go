@@ -904,9 +904,17 @@ func readStoredFile(repo *repository.Repository, source string) ([]byte, os.File
 	return contents, mode, nil
 }
 
+type atomicReplaceHooks struct {
+	afterRename func(temporaryName string) error
+}
+
 // atomicReplaceRooted returns committed=true once the final rename has happened,
 // even if the subsequent directory durability check reports an error.
 func atomicReplaceRooted(rootPath, relative string, fileMode, directoryMode os.FileMode, write func(io.Writer) error) (committed bool, err error) {
+	return atomicReplaceRootedWithHooks(rootPath, relative, fileMode, directoryMode, write, atomicReplaceHooks{})
+}
+
+func atomicReplaceRootedWithHooks(rootPath, relative string, fileMode, directoryMode os.FileMode, write func(io.Writer) error, hooks atomicReplaceHooks) (committed bool, err error) {
 	if relative == "" || filepath.IsAbs(relative) {
 		return false, errors.New("destination must be a non-empty path below its logical root")
 	}
@@ -918,16 +926,16 @@ func atomicReplaceRooted(rootPath, relative string, fileMode, directoryMode os.F
 		return false, fmt.Errorf("open destination parent without following symlinks: %w", err)
 	}
 	defer directory.Close()
-	if err := cleanupDirectoryTemps(directory, ".susu-apply-"); err != nil {
-		return false, fmt.Errorf("clean stale destination staging files: %w", err)
-	}
-	file, temporaryName, err := directory.CreateTemp(".susu-apply-", fileMode)
+	file, temporaryName, err := directory.CreateTempExcluding(".susu-apply-", fileMode, leaf)
 	if err != nil {
 		return false, err
 	}
+	removeTemporary := true
 	defer func() {
 		_ = file.Close()
-		_ = directory.Remove(temporaryName)
+		if removeTemporary {
+			_ = directory.Remove(temporaryName)
+		}
 	}()
 	if err := write(file); err != nil {
 		return false, err
@@ -940,6 +948,12 @@ func atomicReplaceRooted(rootPath, relative string, fileMode, directoryMode os.F
 	}
 	if err := directory.Rename(temporaryName, leaf); err != nil {
 		return false, err
+	}
+	removeTemporary = false
+	if hooks.afterRename != nil {
+		if err := hooks.afterRename(temporaryName); err != nil {
+			return true, fmt.Errorf("run post-rename hook: %w", err)
+		}
 	}
 	if err := directory.Sync(); err != nil {
 		return true, fmt.Errorf("destination was replaced but directory sync failed: %w", err)
@@ -964,22 +978,6 @@ func rejectSymlinkComponents(root *os.Root, relative string, allowMissing bool) 
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("path component %q is a symlink", current)
-		}
-	}
-	return nil
-}
-
-func cleanupDirectoryTemps(directory *safefs.Directory, prefix string) error {
-	entries, err := directory.ReadDir()
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) || !strings.HasSuffix(entry.Name(), ".tmp") {
-			continue
-		}
-		if err := directory.Remove(entry.Name()); err != nil {
-			return err
 		}
 	}
 	return nil

@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,12 +136,31 @@ func (d *Directory) OpenReadWrite(name string, mode os.FileMode) (*os.File, erro
 
 // CreateTemp creates a random exclusive regular file in d.
 func (d *Directory) CreateTemp(prefix string, mode os.FileMode) (*os.File, string, error) {
+	return d.createTemp(prefix, mode, "", rand.Reader)
+}
+
+// CreateTempExcluding creates a random exclusive regular file whose name differs
+// from excludedName. This prevents a staging file from being its own destination.
+func (d *Directory) CreateTempExcluding(prefix string, mode os.FileMode, excludedName string) (*os.File, string, error) {
+	if err := validateLeaf(excludedName); err != nil {
+		return nil, "", fmt.Errorf("validate excluded temporary filename: %w", err)
+	}
+	return d.createTemp(prefix, mode, excludedName, rand.Reader)
+}
+
+func (d *Directory) createTemp(prefix string, mode os.FileMode, excludedName string, random io.Reader) (*os.File, string, error) {
+	if random == nil {
+		return nil, "", errors.New("temporary filename random source is nil")
+	}
 	for range 100 {
-		random := make([]byte, 12)
-		if _, err := rand.Read(random); err != nil {
+		randomBytes := make([]byte, 12)
+		if _, err := io.ReadFull(random, randomBytes); err != nil {
 			return nil, "", fmt.Errorf("generate temporary filename: %w", err)
 		}
-		name := prefix + hex.EncodeToString(random) + ".tmp"
+		name := prefix + hex.EncodeToString(randomBytes) + ".tmp"
+		if name == excludedName {
+			continue
+		}
 		fd, err := unix.Openat(int(d.file.Fd()), name, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(mode.Perm()))
 		if errors.Is(err, unix.EEXIST) {
 			continue
@@ -161,11 +181,6 @@ func (d *Directory) CreateTemp(prefix string, mode os.FileMode) (*os.File, strin
 		return file, name, nil
 	}
 	return nil, "", errors.New("could not allocate a unique temporary filename")
-}
-
-// ReadDir returns entries from the stable directory descriptor.
-func (d *Directory) ReadDir() ([]os.DirEntry, error) {
-	return d.file.ReadDir(-1)
 }
 
 // Link atomically creates newname as a hard link to oldname and never replaces

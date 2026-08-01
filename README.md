@@ -106,7 +106,7 @@ Small files. Small tool. One job.
 ## Documentation
 
 - [Reference](docs/reference.md) — detailed commands, path behavior, repository format, workflows, and limitations.
-- [Security](docs/security.md) — encryption design, threat model, operational guidance, and audit status.
+- [Encryption and security model](docs/security-model.md) — encryption design, threat model, operational guidance, and audit status.
 - [Design and architecture](docs/design.md) — components, data flow, locking, and filesystem guarantees.
 - [Changelog](CHANGELOG.md) — version-specific changes.
 - [Releasing](docs/releasing.md) — maintainer workflow and published artifact matrix.

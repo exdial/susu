@@ -1,6 +1,6 @@
-# Security
+# Encryption and security model
 
-This document specifies the security behavior implemented by `susu`. It covers sensitive-file encryption, key and plaintext handling, repository and destination filesystem protections, failure behavior, and operational limits. For the general repository layout, path model, and command architecture, see [Design](design.md).
+This document specifies the encryption and filesystem security model implemented by `susu`. It covers sensitive-file encryption, key and plaintext handling, repository and destination filesystem protections, failure behavior, and operational limits. For the general repository layout, path model, and command architecture, see [Design](design.md).
 
 > `susu` has not undergone an independent security audit. Review the documented threat model and limitations before relying on it for high-value secrets.
 
@@ -328,19 +328,18 @@ After preflight, destinations are replaced in sorted order. Atomicity is per fil
 For a sensitive destination, `apply`:
 
 1. opens or creates the real parent path beneath the logical root without following child symlinks;
-2. removes non-directory entries matching the reserved `.susu-apply-*.tmp` staging pattern in that parent;
-3. creates an exclusive random `.susu-apply-<24 hex characters>.tmp` file in that directory;
-4. sets the staging file's Unix mode to `0600`;
-5. writes already-authenticated plaintext;
-6. syncs and closes the file;
-7. atomically renames it over the destination leaf; and
-8. syncs the parent directory.
+2. creates an exclusive random `.susu-apply-<24 hex characters>.tmp` file in that directory;
+3. sets the staging file's Unix mode to `0600`;
+4. writes already-authenticated plaintext;
+5. syncs and closes the file;
+6. atomically renames it over the destination leaf; and
+7. syncs the parent directory.
 
 New parent directories requested for sensitive destinations use mode `0700`; existing parent permissions are not tightened. Unix mode bits do not override ACLs, privileged access, backups, snapshots, or other host-level mechanisms.
 
 A destination leaf symlink is replaced as a directory entry rather than followed. A symlink in any component below the configured root is rejected. The configured `HOME` or XDG root itself may be a symlink; it is resolved once before a stable root descriptor is opened.
 
-The staging file briefly contains plaintext. Ordinary errors remove it, but a crash, `SIGKILL`, or power loss can leave it behind. A later `apply` reaching the same parent removes matching stale entries without following them. The `.susu-apply-*.tmp` name pattern is therefore reserved: unrelated non-directory files matching it can also be removed by cleanup.
+The staging file briefly contains plaintext. On ordinary errors before rename, deferred cleanup makes a best-effort attempt to remove only the exact random name created by that replacement. A crash, `SIGKILL`, power loss, or cleanup failure can leave it behind. Later `apply` invocations do not scan the parent or delete staging-like entries by name, so unrelated neighboring entries are preserved; inspect and manually remove a file only after confirming that it is stale residue from an interrupted operation.
 
 ## Password, key, and plaintext lifetime
 
@@ -530,7 +529,7 @@ The repository master key is the compromise boundary. If it is disclosed, every 
 3. **Authenticate repository state before `apply`.** Review the commit, manifest changes, public files, Git provenance, and every destination. Decryptable sensitive files do not make an untrusted manifest or public source safe. The private state directory, active worktree, and Git common directory are protected, but other control paths under HOME/XDG are not.
 4. **Treat original and applied paths as plaintext storage.** Protect the account, permissions, ACLs, full-disk encryption, backups, snapshots, swap, and crash dumps according to the data's sensitivity.
 5. **Use `show` deliberately.** Plaintext goes to stdout and may be captured by redirection, pipelines, terminal history or recording, logs in downstream tools, or shoulder surfing.
-6. **Account for apply staging.** A sensitive `.susu-apply-*.tmp` file is mode `0600` but contains plaintext. After abnormal termination, inspect affected destination directories; a later `apply` removes matching stale entries. Do not use the reserved name pattern for unrelated files.
+6. **Account for apply staging.** A sensitive `.susu-apply-<24 hex characters>.tmp` file is mode `0600` but contains plaintext. After abnormal termination, inspect affected destination directories and manually remove only files confirmed to be stale `susu` residue. Later `apply` invocations deliberately preserve all neighboring staging-like entries.
 7. **Preserve coherent backups.** Back up `susu.json` and `encrypted/` together. A backup of ciphertext without its wrapped key metadata and logical paths is insufficient. Protect backups from deletion even though their sensitive contents are encrypted.
 8. **Do not expect `rm` to erase data.** It leaves the local destination and cannot remove Git history, remote copies, snapshots, or storage remnants.
 9. **Respond to accidental plaintext publication as a credential incident.** Remove or rewrite affected history where appropriate and rotate the exposed underlying credential; adding encryption afterward does not revoke disclosed data.

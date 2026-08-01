@@ -968,6 +968,34 @@ func TestApplyRestoresPublicAndMultipleSensitiveFilesWithOnePasswordRead(t *test
 	assertRepositoryDoesNotContain(t, environment.repository, secondSecret)
 }
 
+func TestApplyPreservesUnmanagedStagingLikeFiles(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	directory := filepath.Join(environment.home, ".config", "staging-safety")
+	destination := mustWriteFile(t, filepath.Join(directory, "managed"), []byte("stored value\n"), 0o644)
+	if _, err := environment.service.Add([]string{destination}, app.AddOptions{}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	mustWriteFile(t, destination, []byte("local value\n"), 0o644)
+
+	unmanaged := map[string][]byte{
+		filepath.Join(directory, ".susu-apply-user-backup.tmp"):              []byte("user backup\n"),
+		filepath.Join(directory, ".susu-apply-0123456789abcdef01234567.tmp"): []byte("exact-shape unmanaged file\n"),
+	}
+	for filename, contents := range unmanaged {
+		mustWriteFile(t, filename, contents, 0o600)
+	}
+
+	result, err := environment.service.Apply(nil)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	assertStrings(t, result.Applied, []string{"${XDG_CONFIG_HOME}/staging-safety/managed"})
+	assertFileContents(t, destination, []byte("stored value\n"))
+	for filename, contents := range unmanaged {
+		assertFileContents(t, filename, contents)
+	}
+}
+
 func TestApplyPreflightsCorruptedSensitiveDataBeforeChangingPublicDestinations(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{})
 	publicDestination := mustWriteFile(t, filepath.Join(environment.home, ".a-public"), []byte("repository public\n"), 0o644)
