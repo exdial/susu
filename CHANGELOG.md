@@ -2,6 +2,12 @@
 
 Notable user-facing changes to `susu` are documented in this file. The README describes the current behavior, while this file records version-specific changes.
 
+## [Unreleased]
+
+### Fixed
+
+- Stopped `apply` from deleting neighboring unmanaged files merely because their names match `.susu-apply-*.tmp`. Ordinary pre-rename error cleanup is now limited to the exact staging name created by the current replacement; crash residue requires explicit inspection and manual removal.
+
 ## [0.1.1]
 
 ### Added
