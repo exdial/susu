@@ -22,9 +22,12 @@ func (*Directory) OpenReadWrite(string, os.FileMode) (*os.File, error) {
 func (*Directory) CreateTemp(string, os.FileMode) (*os.File, string, error) {
 	return nil, "", errUnsupported
 }
-func (*Directory) ReadDir() ([]os.DirEntry, error) { return nil, errUnsupported }
-func (*Directory) Link(string, string) error       { return errUnsupported }
-func (*Directory) Rename(string, string) error     { return errUnsupported }
-func (*Directory) Remove(string) error             { return errUnsupported }
-func (*Directory) Sync() error                     { return errUnsupported }
-func (*Directory) Close() error                    { return nil }
+func (*Directory) CreateTempExcluding(string, os.FileMode, string) (*os.File, string, error) {
+	return nil, "", errUnsupported
+}
+
+func (*Directory) Link(string, string) error   { return errUnsupported }
+func (*Directory) Rename(string, string) error { return errUnsupported }
+func (*Directory) Remove(string) error         { return errUnsupported }
+func (*Directory) Sync() error                 { return errUnsupported }
+func (*Directory) Close() error                { return nil }
