@@ -17,7 +17,7 @@ The implemented command model has explicit data directions:
 
 ## System context
 
-Each invocation constructs its configuration from `HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, the initial working directory, and Go's `runtime.GOOS`. It then performs one command and exits. Git subprocesses additionally inherit the process environment.
+Each invocation constructs its configuration from `HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, the initial working directory, and Go's `runtime.GOOS`. It then performs one command and exits. Git subprocesses inherit the process environment after repository-local and discovery variables are removed.
 
 ```mermaid
 flowchart TB
@@ -34,7 +34,7 @@ flowchart TB
 
 The supported operating-system values are `darwin` and `linux`. The filesystem confinement layer is implemented only for those platforms.
 
-`git` is a runtime dependency for repository validation and locating the common Git administrative directory. The executable is resolved through `PATH`, and Git-related variables such as `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_COMMON_DIR` are not sanitized; they can change Git's interpretation of the worktree or administrative directory. Exact-root validation and lock placement therefore assume a trusted, ordinary Git environment. Git transport and history operations remain outside the process boundary.
+`git` is a runtime dependency for repository validation and locating the common Git administrative directory. The executable is resolved through `PATH`. Before each `rev-parse`, `susu` copies the process environment and removes Git's repository-local variables, numbered command-config overrides, and repository-discovery controls. This includes `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, object/index overrides, and ceiling/cross-filesystem discovery settings. `PATH`, `HOME`, locale, tracing, and Git global/system configuration controls remain inherited. Exact-root validation and lock placement therefore do not accept an inherited repository selection, while the Git executable and retained configuration environment remain trusted. Git transport and history operations remain outside the process boundary.
 
 ## Component responsibilities
 
@@ -95,7 +95,7 @@ The private `susu` state directory, active repository worktree, and Git common a
 
 A symlink supplied directly to `init` is accepted when it resolves to the exact worktree root; the resolved target path is stored. Later commands reject that stored path if it disappears or begins resolving through a symlink. The binding does not persist a device/inode pair, repository identifier, or commit identity, so a different valid worktree recreated or mounted at the same canonical path is accepted. Repository provenance remains an external responsibility.
 
-At the `susu` layer, repository-dependent commands use only this binding. They do not search parent directories, inspect remotes, or define a `susu` environment variable that selects a repository. One state home therefore selects one active path, independent of the command's working directory. Inherited Git environment variables can still alter the Git subprocess interpretation described above.
+At the `susu` layer, repository-dependent commands use only this binding. They do not search parent directories, inspect remotes, or define a `susu` environment variable that selects a repository. One state home therefore selects one active path, independent of the command's working directory. Inherited Git repository-local and discovery variables are removed before validation and cannot reinterpret the binding.
 
 Before a command loads `susu.json`, it verifies that the bound path is still the exact Git worktree root, resolves and retains the same canonical Git common directory used by its lock, checks that both storage roots are real directories rather than symlinks, and requires `susu.json` to be a regular file. Missing scaffolding produces an error rather than implicit repair; `init` is the repair/initialization boundary.
 
@@ -438,7 +438,7 @@ These protections constrain filesystem traversal; they do not make same-user mut
 - `git rev-parse --show-toplevel`, which validates the worktree root as interpreted by Git; and
 - `git rev-parse --git-common-dir`, which locates the repository-wide lock directory.
 
-Both commands use `git` from `PATH` and inherit the caller's environment. Repository-selection variables understood by Git can redirect either result; `susu` does not clear them. The canonical common-directory result is retained for the lifetime of that repository object so locking and app-level boundary checks use the same interpretation without rerunning Git.
+Both commands use `git` from `PATH` and receive a filtered copy of the caller's environment. `susu` removes the repository-local variables reported by Git, numbered command-config overrides, and discovery controls before execution, so inherited repository selection cannot redirect either result. The canonical common-directory result is retained for the lifetime of that repository object so locking and app-level boundary checks use the same interpretation without rerunning Git.
 
 It does not run `git init`, clone, add, commit, status, diff, push, pull, fetch, merge, checkout, conflict resolution, signing, or history rewriting. Bare repositories are not usable because operations require a worktree root and ordinary storage files.
 
