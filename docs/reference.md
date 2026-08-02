@@ -118,6 +118,8 @@ susu init "$HOME/src/dotfiles"
 
 The binding is machine-local; it is not written into the dotfiles repository. Running a repository-dependent command before `init`, or after the configured repository has disappeared, is an error.
 
+`git` is resolved through `PATH`. For root validation and Git common-directory discovery, `susu` removes inherited repository-local and discovery variables such as `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_COMMON_DIR` from the child process environment. These variables therefore cannot redirect the supplied path to another repository or move the `susu` lock into another administrative directory.
+
 `init` does not perform `git init`, clone a remote, or ask for an encryption password. Encryption is initialized lazily by the first sensitive operation.
 
 ### `susu add`
