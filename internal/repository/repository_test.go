@@ -80,6 +80,121 @@ func TestInitializeRejectsInvalidPaths(t *testing.T) {
 	})
 }
 
+func TestInitializeIgnoresInheritedGitDirectoryAndWorkTree(t *testing.T) {
+	attackerRoot := initGitRepository(t)
+	candidateRoot := filepath.Join(t.TempDir(), "candidate")
+	if err := os.Mkdir(candidateRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(attackerRoot, ".git"))
+	t.Setenv("GIT_WORK_TREE", candidateRoot)
+
+	repository, err := Initialize(candidateRoot)
+	if err == nil {
+		t.Fatal("Initialize() accepted a non-Git directory through inherited GIT_DIR and GIT_WORK_TREE")
+	}
+	if repository != nil {
+		t.Fatalf("Initialize() repository = %#v after error, want nil", repository)
+	}
+	if !strings.Contains(err.Error(), "Git repository validation failed") {
+		t.Fatalf("Initialize() error = %q, want Git validation context", err)
+	}
+	for _, path := range []string{
+		filepath.Join(candidateRoot, manifest.Filename),
+		filepath.Join(candidateRoot, "public"),
+		filepath.Join(candidateRoot, "encrypted"),
+		filepath.Join(attackerRoot, ".git", "susu.lock"),
+	} {
+		if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("Initialize() mutated %q through inherited Git environment: %v", path, statErr)
+		}
+	}
+}
+
+func TestInitializeAndOpenIgnoreInheritedGitCommonDirectory(t *testing.T) {
+	targetRoot := initGitRepository(t)
+	attackerRoot := initGitRepository(t)
+	targetCommonDirectory := canonicalPath(t, filepath.Join(targetRoot, ".git"))
+	attackerCommonDirectory := canonicalPath(t, filepath.Join(attackerRoot, ".git"))
+	t.Setenv("GIT_COMMON_DIR", attackerCommonDirectory)
+
+	repository, err := Initialize(targetRoot)
+	if err != nil {
+		t.Fatalf("Initialize(%q) error = %v", targetRoot, err)
+	}
+	if got := repository.GitCommonDirectory(); got != targetCommonDirectory {
+		t.Fatalf("Initialize().GitCommonDirectory() = %q, want %q", got, targetCommonDirectory)
+	}
+	assertRegularFile(t, filepath.Join(targetCommonDirectory, "susu.lock"))
+	if _, err := os.Lstat(filepath.Join(attackerCommonDirectory, "susu.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Initialize() placed a lock in inherited GIT_COMMON_DIR: %v", err)
+	}
+
+	opened, err := Open(repository.Root)
+	if err != nil {
+		t.Fatalf("Open(%q) error = %v", repository.Root, err)
+	}
+	if got := opened.GitCommonDirectory(); got != targetCommonDirectory {
+		t.Fatalf("Open().GitCommonDirectory() = %q, want %q", got, targetCommonDirectory)
+	}
+	release, err := opened.Lock()
+	if err != nil {
+		t.Fatalf("Open().Lock() error = %v", err)
+	}
+	if err := release(); err != nil {
+		t.Fatalf("release Open().Lock(): %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(attackerCommonDirectory, "susu.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Open().Lock() used inherited GIT_COMMON_DIR: %v", err)
+	}
+}
+
+func TestSanitizeGitEnvironment(t *testing.T) {
+	blocked := []string{
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_CEILING_DIRECTORIES",
+		"GIT_COMMON_DIR",
+		"GIT_CONFIG",
+		"GIT_CONFIG_COUNT",
+		"GIT_CONFIG_KEY_0",
+		"GIT_CONFIG_PARAMETERS",
+		"GIT_CONFIG_VALUE_0",
+		"GIT_DIR",
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+		"GIT_GRAFT_FILE",
+		"GIT_IMPLICIT_WORK_TREE",
+		"GIT_INDEX_FILE",
+		"GIT_INTERNAL_SUPER_PREFIX",
+		"GIT_NO_REPLACE_OBJECTS",
+		"GIT_OBJECT_DIRECTORY",
+		"GIT_PREFIX",
+		"GIT_REPLACE_REF_BASE",
+		"GIT_SHALLOW_FILE",
+		"GIT_WORK_TREE",
+	}
+	environment := []string{"PATH=/usr/bin", "HOME=/home/test"}
+	for _, name := range blocked {
+		environment = append(environment, name+"=/first", name+"=/duplicate")
+	}
+	environment = append(environment,
+		"GIT_CONFIG_GLOBAL=/tmp/gitconfig",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TRACE=1",
+		"LANG=en_US.UTF-8",
+	)
+	want := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/test",
+		"GIT_CONFIG_GLOBAL=/tmp/gitconfig",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TRACE=1",
+		"LANG=en_US.UTF-8",
+	}
+	if got := sanitizeGitEnvironment(environment); !reflect.DeepEqual(got, want) {
+		t.Fatalf("sanitizeGitEnvironment() = %#v, want %#v", got, want)
+	}
+}
+
 func TestInitializeAcceptsExactGitRootAndCreatesFiles(t *testing.T) {
 	root := initGitRepository(t)
 
