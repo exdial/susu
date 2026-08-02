@@ -498,6 +498,7 @@ func gitRevParsePath(root, option string) (string, error) {
 	var stdout strings.Builder
 	var stderr strings.Builder
 	command := exec.Command("git", "-C", root, "rev-parse", option)
+	command.Env = sanitizeGitEnvironment(os.Environ())
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
@@ -512,6 +513,49 @@ func gitRevParsePath(root, option string) (string, error) {
 		return "", fmt.Errorf("parse git rev-parse %s output: %w", option, err)
 	}
 	return value, nil
+}
+
+func sanitizeGitEnvironment(environment []string) []string {
+	sanitized := make([]string, 0, len(environment))
+	for _, assignment := range environment {
+		name := assignment
+		if separator := strings.IndexByte(assignment, '='); separator >= 0 {
+			name = assignment[:separator]
+		}
+		if isGitRepositoryEnvironmentVariable(name) {
+			continue
+		}
+		sanitized = append(sanitized, assignment)
+	}
+	return sanitized
+}
+
+// Keep the exact names aligned with `git rev-parse --local-env-vars`;
+// discovery controls are included because they affect repository lookup itself.
+func isGitRepositoryEnvironmentVariable(name string) bool {
+	switch name {
+	case "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_CEILING_DIRECTORIES",
+		"GIT_COMMON_DIR",
+		"GIT_CONFIG",
+		"GIT_CONFIG_COUNT",
+		"GIT_CONFIG_PARAMETERS",
+		"GIT_DIR",
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+		"GIT_GRAFT_FILE",
+		"GIT_IMPLICIT_WORK_TREE",
+		"GIT_INDEX_FILE",
+		"GIT_INTERNAL_SUPER_PREFIX",
+		"GIT_NO_REPLACE_OBJECTS",
+		"GIT_OBJECT_DIRECTORY",
+		"GIT_PREFIX",
+		"GIT_REPLACE_REF_BASE",
+		"GIT_SHALLOW_FILE",
+		"GIT_WORK_TREE":
+		return true
+	default:
+		return strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_")
+	}
 }
 
 func parseGitPathRecord(output string) (string, error) {
