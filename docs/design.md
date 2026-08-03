@@ -263,7 +263,7 @@ Manifest validity is structural. Loading the manifest does not prove that every 
 
 ## Directory expansion and filesystem object policy
 
-`add` treats a real directory as input convenience and expands it recursively into one candidate per regular file. Invocation options apply to every newly managed candidate. Overlapping inputs and duplicate discoveries are deduplicated by logical path.
+`add` treats a real directory as input convenience and expands it recursively into one candidate per regular file, except for the built-in `~/.kube/cache` exclusion described below. Invocation options apply to every newly managed candidate. Overlapping inputs and duplicate discoveries are deduplicated by logical path.
 
 | Encountered object | Explicit input | Found while walking a real directory |
 | --- | --- | --- |
@@ -274,11 +274,13 @@ Manifest validity is structural. Loading the manifest does not prove that every 
 | FIFO, socket, device, or other non-regular object | Error | Skipped |
 | Empty directory | Produces no entry | Produces no entry |
 
+The concrete HOME path resolved from `~/.kube/cache` and every descendant are omitted before candidate processing, independently of XDG logical-path precedence. A recursive walk returns `fs.SkipDir` at the real cache directory; captured directory identity also recognizes physical and filesystem case aliases without following a final cache symlink. The same concrete-path check drops explicitly supplied regular files and real directories. Similar siblings such as `~/.kube/cache.yaml` and `~/.kube/caches/` are not excluded. Explicit symlink and special-file rules retain precedence. If all inputs are ignored, `add` returns without repository mutation or password processing. Existing manifest entries are not removed by this discovery policy.
+
 Candidate discovery completes before repository sources are written. After any required password callback, `add` performs a command-wide preflight that reopens and validates every new candidate against all protected control roots before reading any candidate content or writing any repository source. This catches a protected path substituted during password entry without partially processing an earlier candidate. Each file is then reopened through the confined filesystem layer immediately before reading; the descriptor that is verified as regular is the descriptor read. Both passes repeat canonical/physical repository-root checks and compare the opened descriptor's filesystem identity with protected local-state file identities captured under the state lock. If a candidate is later redirected into a protected root, changed to a symlink or non-regular object, or replaced by a hard link to protected local state, that candidate fails before its content is read or stored.
 
 This is not a simultaneous snapshot of a directory tree. Files are read one at a time and are not locked against modification by other processes, so concurrent writers can change bytes while or between files being captured.
 
-Directory expansion has no general ignore mechanism, but three runtime-specific roots are always reserved. Before walking, `add` rejects any input whose canonical or physical path overlaps the private state directory, active worktree, or Git common administrative directory; this includes an ancestor directory that contains one of them. A hard-linked protected state file discovered inside an otherwise unrelated tree is also rejected during the walk. Other unrelated staging or control paths are not inferred from names, so inputs should still be scoped narrowly.
+Directory expansion has no user-configurable ignore mechanism. It has one built-in content exclusion for `~/.kube/cache`, while three runtime-specific control roots are always reserved. Before walking, `add` rejects any input whose canonical or physical path overlaps the private state directory, active worktree, or Git common administrative directory; this includes an ancestor directory that contains one of them. A hard-linked protected state file discovered inside an otherwise unrelated tree is also rejected during the walk. Other unrelated cache, staging, or control paths are not inferred from names, so inputs should still be scoped narrowly.
 
 ## Command and data flows
 

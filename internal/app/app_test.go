@@ -225,6 +225,157 @@ func TestAddExpandsDirectoriesRecursively(t *testing.T) {
 	}
 }
 
+func TestAddIgnoresKubeCacheDuringRecursiveTraversal(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	kubeDirectory := filepath.Join(environment.home, ".kube")
+	kept := map[string][]byte{
+		"~/.kube/cache.yaml":       []byte("cache configuration\n"),
+		"~/.kube/caches/keep.json": []byte("not the cache directory\n"),
+		"~/.kube/config":           []byte("cluster configuration\n"),
+	}
+	for logical, contents := range kept {
+		absolute, err := environment.resolver.Resolve(logical)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWriteFile(t, absolute, contents, 0o600)
+	}
+	ignored := map[string][]byte{
+		"~/.kube/cache/discovery/example": []byte("discovery cache\n"),
+		"~/.kube/cache/http/response":     []byte("HTTP cache\n"),
+	}
+	for logical, contents := range ignored {
+		absolute, err := environment.resolver.Resolve(logical)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWriteFile(t, absolute, contents, 0o600)
+	}
+	cacheDirectory := filepath.Join(kubeDirectory, "cache")
+	if err := os.Chmod(cacheDirectory, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cacheDirectory, 0o700) })
+
+	result, err := environment.service.Add([]string{kubeDirectory}, app.AddOptions{})
+	if err != nil {
+		t.Fatalf("Add(%q) error = %v", kubeDirectory, err)
+	}
+	wantPaths := []string{"~/.kube/cache.yaml", "~/.kube/caches/keep.json", "~/.kube/config"}
+	assertStrings(t, result.Added, wantPaths)
+	assertStrings(t, managedPaths(t, environment.service), wantPaths)
+	for logical, contents := range kept {
+		assertFileContents(t, repositorySource(t, environment, logical, false), contents)
+	}
+	for logical := range ignored {
+		assertPathDoesNotExist(t, repositorySource(t, environment, logical, false))
+	}
+}
+
+func TestAddIgnoresExplicitKubeCachePathsWithoutPassword(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	cacheDirectory := filepath.Join(environment.home, ".kube", "cache")
+	cachedFile := mustWriteFile(t, filepath.Join(cacheDirectory, "discovery", "example"), []byte("discovery cache\n"), 0o600)
+	var passwordCalls []bool
+
+	result, err := environment.service.Add([]string{cacheDirectory, cachedFile}, app.AddOptions{
+		Sensitive: true,
+		Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+	})
+	if err != nil {
+		t.Fatalf("Add(kube cache) error = %v", err)
+	}
+	assertStrings(t, result.Added, nil)
+	assertStrings(t, result.AlreadyManaged, nil)
+	assertPasswordCalls(t, passwordCalls, nil)
+	assertStrings(t, managedPaths(t, environment.service), nil)
+	assertPathDoesNotExist(t, repositorySource(t, environment, "~/.kube/cache/discovery/example", true))
+}
+
+func TestAddIgnoresKubeCacheWhenXDGConfigOverlaps(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{xdgConfigUnderKube: true})
+	config := mustWriteFile(t, filepath.Join(environment.home, ".kube", "config"), []byte("cluster configuration\n"), 0o600)
+	cached := mustWriteFile(t, filepath.Join(environment.home, ".kube", "cache", "discovery", "example"), []byte("discovery cache\n"), 0o600)
+
+	result, err := environment.service.Add([]string{filepath.Join(environment.home, ".kube")}, app.AddOptions{})
+	if err != nil {
+		t.Fatalf("Add(overlapping XDG kube directory) error = %v", err)
+	}
+	wantPaths := []string{"${XDG_CONFIG_HOME}/config"}
+	assertStrings(t, result.Added, wantPaths)
+	assertStrings(t, managedPaths(t, environment.service), wantPaths)
+	assertFileContents(t, repositorySource(t, environment, "${XDG_CONFIG_HOME}/config", false), mustReadFile(t, config))
+	assertPathDoesNotExist(t, repositorySource(t, environment, "${XDG_CONFIG_HOME}/cache/discovery/example", false))
+	assertFileContents(t, cached, []byte("discovery cache\n"))
+}
+
+func TestAddIgnoresCaseAliasedKubeCache(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	kubeDirectory := filepath.Join(environment.home, ".kube")
+	cacheDirectory := filepath.Join(kubeDirectory, "Cache")
+	cachedFile := mustWriteFile(t, filepath.Join(cacheDirectory, "discovery", "example"), []byte("discovery cache\n"), 0o600)
+	lowercaseInfo, err := os.Stat(filepath.Join(kubeDirectory, "cache"))
+	if err != nil {
+		t.Skip("test filesystem is case-sensitive")
+	}
+	cacheInfo, err := os.Stat(cacheDirectory)
+	if err != nil || !os.SameFile(cacheInfo, lowercaseInfo) {
+		t.Skip("test filesystem is case-sensitive")
+	}
+	mustWriteFile(t, filepath.Join(kubeDirectory, "config"), []byte("cluster configuration\n"), 0o600)
+
+	result, err := environment.service.Add([]string{kubeDirectory}, app.AddOptions{})
+	if err != nil {
+		t.Fatalf("Add(case-aliased kube cache) error = %v", err)
+	}
+	assertStrings(t, result.Added, []string{"~/.kube/config"})
+	assertStrings(t, managedPaths(t, environment.service), []string{"~/.kube/config"})
+	assertPathDoesNotExist(t, repositorySource(t, environment, "~/.kube/Cache/discovery/example", false))
+
+	explicit, err := environment.service.Add([]string{cachedFile}, app.AddOptions{})
+	if err != nil {
+		t.Fatalf("Add(explicit case-aliased kube cache file) error = %v", err)
+	}
+	assertStrings(t, explicit.Added, nil)
+	assertStrings(t, managedPaths(t, environment.service), []string{"~/.kube/config"})
+}
+
+func TestKubeCacheSymlinkDoesNotBroadenAddExclusion(t *testing.T) {
+	tests := []struct {
+		name   string
+		target func(*testEnvironment) string
+	}{
+		{name: "home target", target: func(environment *testEnvironment) string { return environment.home }},
+		{name: "self loop", target: func(*testEnvironment) string { return "cache" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment := newTestEnvironment(t, testEnvironmentOptions{})
+			kubeDirectory := filepath.Join(environment.home, ".kube")
+			if err := os.MkdirAll(kubeDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cacheLink := filepath.Join(kubeDirectory, "cache")
+			if err := os.Symlink(test.target(environment), cacheLink); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			ordinary := mustWriteFile(t, filepath.Join(environment.home, ".zshrc"), []byte("ordinary\n"), 0o600)
+
+			result, err := environment.service.Add([]string{ordinary}, app.AddOptions{})
+			if err != nil {
+				t.Fatalf("Add(unrelated file) with kube cache symlink error = %v", err)
+			}
+			assertStrings(t, result.Added, []string{"~/.zshrc"})
+			assertFileContents(t, repositorySource(t, environment, "~/.zshrc", false), []byte("ordinary\n"))
+
+			if _, err := environment.service.Add([]string{cacheLink}, app.AddOptions{}); err == nil {
+				t.Fatal("Add() accepted an explicit kube cache symlink")
+			}
+			assertStrings(t, managedPaths(t, environment.service), []string{"~/.zshrc"})
+		})
+	}
+}
+
 func TestAddRejectsExplicitSymlinksAndSkipsWalkedSymlinks(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{})
 	outsideFile := mustWriteFile(t, filepath.Join(environment.root, "targets", "actual.conf"), []byte("must not be copied\n"), 0o640)
@@ -1971,6 +2122,7 @@ func TestConcurrentAddsThroughDifferentStateHomesDoNotLoseManifestUpdates(t *tes
 type testEnvironmentOptions struct {
 	platform            string
 	customXDG           bool
+	xdgConfigUnderKube  bool
 	pathsWithSpaces     bool
 	repositoryUnderHome bool
 	linkedWorktree      bool
@@ -2018,7 +2170,10 @@ func newTestEnvironment(t *testing.T, options testEnvironmentOptions) *testEnvir
 	configuredXDGState := ""
 	xdgConfigHome := filepath.Join(home, ".config")
 	xdgStateHome := filepath.Join(home, ".local", "state")
-	if options.customXDG {
+	if options.xdgConfigUnderKube {
+		configuredXDGConfig = filepath.Join(home, ".kube")
+		xdgConfigHome = configuredXDGConfig
+	} else if options.customXDG {
 		configuredXDGConfig = filepath.Join(root, configName)
 		configuredXDGState = filepath.Join(root, stateName)
 		xdgConfigHome = configuredXDGConfig

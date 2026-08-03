@@ -145,6 +145,12 @@ The active private `susu` state directory, active repository worktree, and Git c
 
 Public files use a Git-portable mode policy: non-executable files are stored and applied as `0644`, while files with any executable bit are stored and applied as `0755`. Git does not preserve arbitrary Unix permission bits. Sensitive destinations always use `0600`.
 
+#### Built-in ignored paths
+
+`~/.kube/cache` is generated Kubernetes client cache data and is not manageable. `add` resolves this location from the configured HOME independently of XDG normalization, skips its real directory and physical/case aliases during recursive walking, and ignores explicitly supplied regular files or real directories at or below it. Similar names such as `~/.kube/cache.yaml` and `~/.kube/caches/` remain ordinary candidates. An invocation containing only ignored cache paths makes no repository change and does not request a sensitive password. Explicit symlinks and special files continue to follow the normal object policy below and are rejected rather than silently ignored.
+
+Existing manifests created by earlier versions are not rewritten automatically; the exclusion affects only new `add` candidate discovery.
+
 #### Symlinks and special files
 
 The behavior is intentionally conservative:
