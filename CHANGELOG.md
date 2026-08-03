@@ -6,6 +6,7 @@ Notable user-facing changes to `susu` are documented in this file. The README de
 
 ### Fixed
 
+- Excluded the real `~/.kube/cache` directory, its descendants, and physical/case aliases from recursive and explicit regular-file or directory `add` inputs.
 - Prevented inherited Git repository-local and discovery environment variables from redirecting repository-root validation or repository-lock placement.
 - Stopped `apply` from deleting neighboring unmanaged files merely because their names match `.susu-apply-*.tmp`. Ordinary pre-rename error cleanup is now limited to the exact staging name created by the current replacement; crash residue requires explicit inspection and manual removal.
 
