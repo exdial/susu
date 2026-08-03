@@ -23,6 +23,7 @@ const (
 	maxManagedFileSize     = int64(512 << 20)
 	maxRepositoryFileSize  = int64(1 << 30)
 	maxApplySensitiveBytes = int64(1 << 30)
+	kubeCacheLogicalPath   = paths.HomePrefix + "/.kube/cache"
 )
 
 var (
@@ -113,6 +114,11 @@ type candidate struct {
 	logical  string
 	mode     os.FileMode
 	source   string
+}
+
+type addIgnorePolicy struct {
+	kubeCachePath string
+	kubeCacheInfo fs.FileInfo
 }
 
 type localStateBoundary struct {
@@ -659,6 +665,10 @@ func (s *Service) openLocked() (*repository.Repository, manifest.Manifest, func(
 }
 
 func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *controlBoundary) ([]candidate, error) {
+	ignorePolicy, err := s.loadAddIgnorePolicy()
+	if err != nil {
+		return nil, err
+	}
 	byLogical := make(map[string]candidate)
 	bySource := make(map[string]string)
 	for _, input := range inputs {
@@ -702,7 +712,16 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *c
 				if walkErr != nil {
 					return walkErr
 				}
-				if filename == start || entry.IsDir() {
+				childRelative := filepath.FromSlash(filename)
+				childAbsolute := filepath.Join(rootPath, childRelative)
+				if entry.IsDir() {
+					ignored, ignoreErr := ignorePolicy.ignores(childAbsolute)
+					if ignoreErr != nil {
+						return fmt.Errorf("check built-in ignore policy for %q: %w", childAbsolute, ignoreErr)
+					}
+					if ignored {
+						return fs.SkipDir
+					}
 					return nil
 				}
 				if entry.Type()&os.ModeSymlink != 0 {
@@ -715,9 +734,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *c
 				if !entryInfo.Mode().IsRegular() {
 					return nil
 				}
-				childRelative := filepath.FromSlash(filename)
-				childAbsolute := filepath.Join(rootPath, childRelative)
-				return s.addCandidate(byLogical, bySource, rootPath, childRelative, childAbsolute, entryInfo.Mode(), sensitive, boundary)
+				return s.addCandidate(byLogical, bySource, rootPath, childRelative, childAbsolute, entryInfo.Mode(), sensitive, boundary, ignorePolicy)
 			})
 			closeErr := root.Close()
 			if err != nil {
@@ -735,7 +752,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *c
 		if err := root.Close(); err != nil {
 			return nil, fmt.Errorf("close path root for %q: %w", absolute, err)
 		}
-		if err := s.addCandidate(byLogical, bySource, rootPath, relative, absolute, info.Mode(), sensitive, boundary); err != nil {
+		if err := s.addCandidate(byLogical, bySource, rootPath, relative, absolute, info.Mode(), sensitive, boundary, ignorePolicy); err != nil {
 			return nil, err
 		}
 	}
@@ -748,9 +765,16 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *c
 	return result, nil
 }
 
-func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[string]string, root, relative, absolute string, mode os.FileMode, sensitive bool, boundary *controlBoundary) error {
+func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[string]string, root, relative, absolute string, mode os.FileMode, sensitive bool, boundary *controlBoundary, ignorePolicy addIgnorePolicy) error {
 	if err := boundary.ensureOutside(absolute); err != nil {
 		return fmt.Errorf("add discovered file %q: %w", absolute, err)
+	}
+	ignored, err := ignorePolicy.ignores(absolute)
+	if err != nil {
+		return fmt.Errorf("check built-in ignore policy for %q: %w", absolute, err)
+	}
+	if ignored {
+		return nil
 	}
 	logical, err := s.paths.Normalize(absolute)
 	if err != nil {
@@ -768,6 +792,27 @@ func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[stri
 		byLogical[logical] = candidate{absolute: absolute, root: root, relative: relative, logical: logical, mode: mode, source: source}
 	}
 	return nil
+}
+
+func (s *Service) loadAddIgnorePolicy() (addIgnorePolicy, error) {
+	kubeCachePath, err := s.paths.Resolve(kubeCacheLogicalPath)
+	if err != nil {
+		return addIgnorePolicy{}, fmt.Errorf("resolve built-in Kubernetes cache exclusion: %w", err)
+	}
+	policy := addIgnorePolicy{kubeCachePath: kubeCachePath}
+	info, err := os.Lstat(kubeCachePath)
+	if err == nil && info.IsDir() {
+		policy.kubeCacheInfo = info
+	}
+	return policy, nil
+}
+
+func (p addIgnorePolicy) ignores(candidate string) (bool, error) {
+	within, err := pathWithin(p.kubeCachePath, candidate)
+	if err != nil || within || p.kubeCacheInfo == nil {
+		return within, err
+	}
+	return physicalAncestorMatches(p.kubeCacheInfo, candidate)
 }
 
 func normalizePlatforms(values []string) ([]string, error) {
@@ -1240,6 +1285,10 @@ func physicalAncestorWithin(root, target string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	return physicalAncestorMatches(rootInfo, target)
+}
+
+func physicalAncestorMatches(rootInfo fs.FileInfo, target string) (bool, error) {
 	probe, err := filepath.Abs(target)
 	if err != nil {
 		return false, err
