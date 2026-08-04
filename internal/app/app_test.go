@@ -198,6 +198,167 @@ func TestAddIsIdempotentAndMixedInputsAddOnlyNewFiles(t *testing.T) {
 	assertStrings(t, managedPaths(t, environment.service), []string{"~/.existing", "~/.new"})
 }
 
+func TestAddTreatsManagedHardLinkAliasAsAlreadyManagedWithoutPassword(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	managed := mustWriteFile(t, filepath.Join(environment.home, ".managed"), []byte("stored snapshot\n"), 0o600)
+	if _, err := environment.service.Add([]string{managed}, app.AddOptions{}); err != nil {
+		t.Fatalf("initial Add() error = %v", err)
+	}
+	alias := filepath.Join(environment.home, ".managed-alias")
+	if err := os.Link(managed, alias); err != nil {
+		t.Skipf("hard links are unavailable: %v", err)
+	}
+	manifestBefore := mustReadFile(t, filepath.Join(environment.repository, manifest.Filename))
+	var passwordCalls []bool
+
+	result, err := environment.service.Add([]string{alias}, app.AddOptions{
+		Sensitive: true,
+		Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+	})
+	if err != nil {
+		t.Fatalf("Add(hard-link alias) error = %v", err)
+	}
+	assertStrings(t, result.Added, nil)
+	assertStrings(t, result.AlreadyManaged, []string{"~/.managed-alias"})
+	assertPasswordCalls(t, passwordCalls, nil)
+	assertStrings(t, managedPaths(t, environment.service), []string{"~/.managed"})
+	assertFileContents(t, filepath.Join(environment.repository, manifest.Filename), manifestBefore)
+	assertPathDoesNotExist(t, repositorySource(t, environment, "~/.managed-alias", true))
+}
+
+func TestAddRejectsNewHardLinkAliasesBeforePassword(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	first := mustWriteFile(t, filepath.Join(environment.home, ".first-alias"), []byte("same inode\n"), 0o600)
+	second := filepath.Join(environment.home, ".second-alias")
+	if err := os.Link(first, second); err != nil {
+		t.Skipf("hard links are unavailable: %v", err)
+	}
+	var passwordCalls []bool
+
+	result, err := environment.service.Add([]string{second, first}, app.AddOptions{
+		Sensitive: true,
+		Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+	})
+	if !errors.Is(err, app.ErrDestinationConflict) {
+		t.Fatalf("Add(new hard-link aliases) error = %v, want ErrDestinationConflict", err)
+	}
+	assertStrings(t, result.Added, nil)
+	assertStrings(t, result.AlreadyManaged, nil)
+	assertPasswordCalls(t, passwordCalls, nil)
+	current := mustLoadManifest(t, environment)
+	if current.Crypto != nil {
+		t.Fatal("conflicting Add() initialized repository encryption")
+	}
+	assertStrings(t, managedPaths(t, environment.service), nil)
+	assertPathDoesNotExist(t, repositorySource(t, environment, "~/.first-alias", true))
+	assertPathDoesNotExist(t, repositorySource(t, environment, "~/.second-alias", true))
+}
+
+func TestAddRechecksManagedPhysicalAliasAfterPassword(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	managed := mustWriteFile(t, filepath.Join(environment.home, ".managed-before-password"), []byte("managed\n"), 0o600)
+	if _, err := environment.service.Add([]string{managed}, app.AddOptions{}); err != nil {
+		t.Fatalf("initial Add() error = %v", err)
+	}
+	candidate := mustWriteFile(t, filepath.Join(environment.home, ".candidate-after-password"), []byte("candidate\n"), 0o600)
+	manifestBefore := mustReadFile(t, filepath.Join(environment.repository, manifest.Filename))
+	var passwordCalls []bool
+	passwordProvider := func(create bool) ([]byte, error) {
+		passwordCalls = append(passwordCalls, create)
+		if err := os.Remove(managed); err != nil {
+			return nil, err
+		}
+		if err := os.Link(candidate, managed); err != nil {
+			return nil, err
+		}
+		return []byte(testPassword), nil
+	}
+
+	result, err := environment.service.Add([]string{candidate}, app.AddOptions{Sensitive: true, Password: passwordProvider})
+	if !errors.Is(err, app.ErrDestinationConflict) {
+		t.Fatalf("Add(password-time alias) error = %v, want ErrDestinationConflict", err)
+	}
+	assertStrings(t, result.Added, nil)
+	assertStrings(t, result.AlreadyManaged, nil)
+	assertPasswordCalls(t, passwordCalls, []bool{true})
+	assertFileContents(t, filepath.Join(environment.repository, manifest.Filename), manifestBefore)
+	assertPathDoesNotExist(t, repositorySource(t, environment, "~/.candidate-after-password", true))
+	assertStrings(t, managedPaths(t, environment.service), []string{"~/.managed-before-password"})
+}
+
+func TestAddDoesNotFollowManagedLeafSymlinkForIdentity(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	managed := mustWriteFile(t, filepath.Join(environment.home, ".managed-link"), []byte("managed snapshot\n"), 0o600)
+	if _, err := environment.service.Add([]string{managed}, app.AddOptions{}); err != nil {
+		t.Fatalf("initial Add() error = %v", err)
+	}
+	candidate := mustWriteFile(t, filepath.Join(environment.home, ".symlink-target-candidate"), []byte("new candidate\n"), 0o600)
+	if err := os.Remove(managed); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(candidate, managed); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	result, err := environment.service.Add([]string{candidate}, app.AddOptions{})
+	if err != nil {
+		t.Fatalf("Add(target of managed leaf symlink) error = %v", err)
+	}
+	assertStrings(t, result.Added, []string{"~/.symlink-target-candidate"})
+	assertStrings(t, result.AlreadyManaged, nil)
+	assertStrings(t, managedPaths(t, environment.service), []string{"~/.managed-link", "~/.symlink-target-candidate"})
+	assertFileContents(t, repositorySource(t, environment, "~/.symlink-target-candidate", false), []byte("new candidate\n"))
+}
+
+func TestAddHandlesCaseAliasedXDGAndHomeIdentities(t *testing.T) {
+	t.Run("existing managed alias", func(t *testing.T) {
+		environment := newTestEnvironment(t, testEnvironmentOptions{platform: "darwin", xdgConfigUnderHomeCase: true})
+		xdgPath := mustWriteFile(t, filepath.Join(environment.xdgConfigHome, "item"), []byte("managed\n"), 0o600)
+		homeAlias := filepath.Join(environment.home, "config", "item")
+		if !sameExistingFile(xdgPath, homeAlias) {
+			t.Skip("test filesystem is case-sensitive")
+		}
+		if _, err := environment.service.Add([]string{xdgPath}, app.AddOptions{}); err != nil {
+			t.Fatalf("initial XDG Add() error = %v", err)
+		}
+		var passwordCalls []bool
+
+		result, err := environment.service.Add([]string{homeAlias}, app.AddOptions{
+			Sensitive: true,
+			Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+		})
+		if err != nil {
+			t.Fatalf("Add(case-aliased managed path) error = %v", err)
+		}
+		assertStrings(t, result.Added, nil)
+		assertStrings(t, result.AlreadyManaged, []string{"~/config/item"})
+		assertPasswordCalls(t, passwordCalls, nil)
+		assertStrings(t, managedPaths(t, environment.service), []string{"${XDG_CONFIG_HOME}/item"})
+	})
+
+	t.Run("two new aliases", func(t *testing.T) {
+		environment := newTestEnvironment(t, testEnvironmentOptions{platform: "darwin", xdgConfigUnderHomeCase: true})
+		xdgPath := mustWriteFile(t, filepath.Join(environment.xdgConfigHome, "item"), []byte("candidate\n"), 0o600)
+		homeAlias := filepath.Join(environment.home, "config", "item")
+		if !sameExistingFile(xdgPath, homeAlias) {
+			t.Skip("test filesystem is case-sensitive")
+		}
+		var passwordCalls []bool
+
+		result, err := environment.service.Add([]string{xdgPath, homeAlias}, app.AddOptions{
+			Sensitive: true,
+			Password:  recordingPasswordProvider(testPassword, &passwordCalls),
+		})
+		if !errors.Is(err, app.ErrDestinationConflict) {
+			t.Fatalf("Add(case-aliased new paths) error = %v, want ErrDestinationConflict", err)
+		}
+		assertStrings(t, result.Added, nil)
+		assertStrings(t, result.AlreadyManaged, nil)
+		assertPasswordCalls(t, passwordCalls, nil)
+		assertStrings(t, managedPaths(t, environment.service), nil)
+	})
+}
+
 func TestAddExpandsDirectoriesRecursively(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{})
 	directory := filepath.Join(environment.home, "tree")
@@ -1117,6 +1278,192 @@ func TestApplyRestoresPublicAndMultipleSensitiveFilesWithOnePasswordRead(t *test
 	assertPermissions(t, secondDestination, 0o600)
 	assertRepositoryDoesNotContain(t, environment.repository, firstSecret)
 	assertRepositoryDoesNotContain(t, environment.repository, secondSecret)
+}
+
+func TestApplyRejectsDarwinCaseAndUnicodeDestinationAliases(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries func(*testing.T, *testEnvironment) []manifest.Entry
+	}{
+		{
+			name: "HOME and XDG case alias",
+			entries: func(t *testing.T, environment *testEnvironment) []manifest.Entry {
+				return []manifest.Entry{
+					mustLogicalEntry(t, "${XDG_CONFIG_HOME}/item", true),
+					mustLogicalEntry(t, "~/config/item", false),
+				}
+			},
+		},
+		{
+			name: "NFC and NFD alias",
+			entries: func(t *testing.T, environment *testEnvironment) []manifest.Entry {
+				return []manifest.Entry{
+					mustLogicalEntry(t, "~/caf\u00e9", true),
+					mustLogicalEntry(t, "~/cafe\u0301", false),
+				}
+			},
+		},
+		{
+			name: "case-aliased ancestor",
+			entries: func(t *testing.T, environment *testEnvironment) []manifest.Entry {
+				return []manifest.Entry{
+					mustLogicalEntry(t, "${XDG_CONFIG_HOME}/parent", true),
+					mustLogicalEntry(t, "~/config/PARENT/child", false),
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment := newTestEnvironment(t, testEnvironmentOptions{platform: "darwin", xdgConfigUnderHomeCase: true})
+			current := manifest.New()
+			current.Crypto = mustCryptoMetadata(t)
+			current.Entries = test.entries(t, environment)
+			mustSaveManifest(t, environment, current)
+			var passwordCalls []bool
+
+			result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &passwordCalls))
+			if !errors.Is(err, app.ErrDestinationConflict) {
+				t.Fatalf("Apply(aliased destinations) error = %v, want ErrDestinationConflict", err)
+			}
+			assertStrings(t, result.Applied, nil)
+			assertStrings(t, result.Skipped, nil)
+			assertPasswordCalls(t, passwordCalls, nil)
+			for _, entry := range current.Entries {
+				assertPathDoesNotExist(t, filepath.Join(environment.repository, filepath.FromSlash(entry.Source)))
+			}
+		})
+	}
+}
+
+func TestApplyPrioritizesProtectedRootErrorsOverDestinationAliases(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "darwin", repositoryUnderHome: true})
+	protectedDestination := filepath.Join(environment.repository, "protected")
+	protected := mustEntryForDestination(t, environment, protectedDestination, true)
+	alias := mustLogicalEntry(t, "~/SRC/REPOSITORY/PROTECTED", false)
+	current := manifest.New()
+	current.Crypto = mustCryptoMetadata(t)
+	current.Entries = []manifest.Entry{protected, alias}
+	mustSaveManifest(t, environment, current)
+	var passwordCalls []bool
+
+	result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &passwordCalls))
+	if !errors.Is(err, app.ErrProtectedRepository) {
+		t.Fatalf("Apply(protected alias conflict) error = %v, want ErrProtectedRepository", err)
+	}
+	if errors.Is(err, app.ErrDestinationConflict) {
+		t.Fatalf("Apply(protected alias conflict) returned lower-priority ErrDestinationConflict: %v", err)
+	}
+	assertStrings(t, result.Applied, nil)
+	assertStrings(t, result.Skipped, nil)
+	assertPasswordCalls(t, passwordCalls, nil)
+}
+
+func TestApplyRechecksDestinationAliasesAfterPassword(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "darwin", customXDG: true})
+	current := manifest.New()
+	current.Crypto = mustCryptoMetadata(t)
+	current.Entries = []manifest.Entry{
+		mustLogicalEntry(t, "${XDG_CONFIG_HOME}/shared", true),
+		mustLogicalEntry(t, "~/shared", false),
+	}
+	mustSaveManifest(t, environment, current)
+	var passwordCalls []bool
+	passwordProvider := func(create bool) ([]byte, error) {
+		passwordCalls = append(passwordCalls, create)
+		if err := os.RemoveAll(environment.xdgConfigHome); err != nil {
+			return nil, err
+		}
+		if err := os.Symlink(environment.home, environment.xdgConfigHome); err != nil {
+			return nil, err
+		}
+		return []byte(testPassword), nil
+	}
+
+	result, err := environment.service.Apply(passwordProvider)
+	if !errors.Is(err, app.ErrDestinationConflict) {
+		t.Fatalf("Apply(password-time destination alias) error = %v, want ErrDestinationConflict", err)
+	}
+	assertStrings(t, result.Applied, nil)
+	assertStrings(t, result.Skipped, nil)
+	assertPasswordCalls(t, passwordCalls, []bool{false})
+	for _, entry := range current.Entries {
+		assertPathDoesNotExist(t, filepath.Join(environment.repository, filepath.FromSlash(entry.Source)))
+	}
+}
+
+func TestApplySkipsExcludedDarwinDestinationAlias(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "darwin", xdgConfigUnderHomeCase: true})
+	applied := mustLogicalEntry(t, "${XDG_CONFIG_HOME}/item", false)
+	excluded := mustLogicalEntry(t, "~/config/ITEM", true)
+	excluded.ExcludePlatforms = []string{"darwin"}
+	current := manifest.New()
+	current.Crypto = mustCryptoMetadata(t)
+	current.Entries = []manifest.Entry{applied, excluded}
+	mustSaveManifest(t, environment, current)
+	storedContents := []byte("applicable snapshot\n")
+	mustWriteFile(t, filepath.Join(environment.repository, filepath.FromSlash(applied.Source)), storedContents, 0o644)
+	var passwordCalls []bool
+
+	result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &passwordCalls))
+	if err != nil {
+		t.Fatalf("Apply(excluded alias) error = %v", err)
+	}
+	assertStrings(t, result.Applied, []string{applied.Path})
+	assertStrings(t, result.Skipped, []string{excluded.Path})
+	assertPasswordCalls(t, passwordCalls, nil)
+	assertFileContents(t, filepath.Join(environment.xdgConfigHome, "item"), storedContents)
+	assertPathDoesNotExist(t, filepath.Join(environment.repository, filepath.FromSlash(excluded.Source)))
+}
+
+func TestApplyKeepsLinuxCaseVariantsDistinct(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "linux", xdgConfigUnderHomeCase: true})
+	first := mustLogicalEntry(t, "${XDG_CONFIG_HOME}/item", false)
+	second := mustLogicalEntry(t, "~/config/ITEM", false)
+	current := manifest.New()
+	current.Entries = []manifest.Entry{first, second}
+	mustSaveManifest(t, environment, current)
+	mustWriteFile(t, filepath.Join(environment.repository, filepath.FromSlash(first.Source)), []byte("first\n"), 0o644)
+	mustWriteFile(t, filepath.Join(environment.repository, filepath.FromSlash(second.Source)), []byte("second\n"), 0o644)
+
+	result, err := environment.service.Apply(nil)
+	if err != nil {
+		t.Fatalf("Apply(Linux case variants) error = %v", err)
+	}
+	assertStrings(t, result.Applied, []string{first.Path, second.Path})
+	assertStrings(t, result.Skipped, nil)
+}
+
+func TestApplyReplacesLeafSymlinkWithoutFollowingItsTarget(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "darwin"})
+	storedContents := []byte("managed snapshot\n")
+	destination := mustWriteFile(t, filepath.Join(environment.home, ".leaf-symlink"), storedContents, 0o644)
+	if _, err := environment.service.Add([]string{destination}, app.AddOptions{}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	outside := mustWriteFile(t, filepath.Join(environment.root, "outside-target"), []byte("outside unchanged\n"), 0o600)
+	if err := os.Remove(destination); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, destination); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	result, err := environment.service.Apply(nil)
+	if err != nil {
+		t.Fatalf("Apply(leaf symlink) error = %v", err)
+	}
+	assertStrings(t, result.Applied, []string{"~/.leaf-symlink"})
+	info, err := os.Lstat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		t.Fatalf("destination mode after Apply() = %v, want regular file", info.Mode())
+	}
+	assertFileContents(t, destination, storedContents)
+	assertFileContents(t, outside, []byte("outside unchanged\n"))
 }
 
 func TestApplyPreservesUnmanagedStagingLikeFiles(t *testing.T) {
@@ -2120,12 +2467,13 @@ func TestConcurrentAddsThroughDifferentStateHomesDoNotLoseManifestUpdates(t *tes
 }
 
 type testEnvironmentOptions struct {
-	platform            string
-	customXDG           bool
-	xdgConfigUnderKube  bool
-	pathsWithSpaces     bool
-	repositoryUnderHome bool
-	linkedWorktree      bool
+	platform               string
+	customXDG              bool
+	xdgConfigUnderKube     bool
+	xdgConfigUnderHomeCase bool
+	pathsWithSpaces        bool
+	repositoryUnderHome    bool
+	linkedWorktree         bool
 }
 
 type testEnvironment struct {
@@ -2172,6 +2520,9 @@ func newTestEnvironment(t *testing.T, options testEnvironmentOptions) *testEnvir
 	xdgStateHome := filepath.Join(home, ".local", "state")
 	if options.xdgConfigUnderKube {
 		configuredXDGConfig = filepath.Join(home, ".kube")
+		xdgConfigHome = configuredXDGConfig
+	} else if options.xdgConfigUnderHomeCase {
+		configuredXDGConfig = filepath.Join(home, "Config")
 		xdgConfigHome = configuredXDGConfig
 	} else if options.customXDG {
 		configuredXDGConfig = filepath.Join(root, configName)
@@ -2326,6 +2677,31 @@ func mustSaveManifest(t *testing.T, environment *testEnvironment, current manife
 	if err := manifest.Save(filepath.Join(environment.repository, manifest.Filename), current); err != nil {
 		t.Fatalf("save manifest: %v", err)
 	}
+}
+
+func mustLogicalEntry(t *testing.T, logical string, sensitive bool) manifest.Entry {
+	t.Helper()
+	source, err := manifest.SourceFor(logical, sensitive)
+	if err != nil {
+		t.Fatalf("SourceFor(%q): %v", logical, err)
+	}
+	return manifest.Entry{Path: logical, Source: source, Sensitive: sensitive}
+}
+
+func mustCryptoMetadata(t *testing.T) *cryptox.Metadata {
+	t.Helper()
+	metadata, masterKey, err := cryptox.Initialize([]byte(testPassword))
+	if err != nil {
+		t.Fatalf("initialize test repository crypto: %v", err)
+	}
+	cryptox.ZeroBytes(masterKey)
+	return &metadata
+}
+
+func sameExistingFile(first, second string) bool {
+	firstInfo, firstErr := os.Stat(first)
+	secondInfo, secondErr := os.Stat(second)
+	return firstErr == nil && secondErr == nil && os.SameFile(firstInfo, secondInfo)
 }
 
 func mustEntryForDestination(t *testing.T, environment *testEnvironment, destination string, sensitive bool) manifest.Entry {

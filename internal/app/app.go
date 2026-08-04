@@ -33,6 +33,9 @@ var (
 	ErrUnsupportedPlatform = errors.New("unsupported platform value")
 	// ErrPasswordRequired indicates that an operation needs an interactive or injected password provider.
 	ErrPasswordRequired = errors.New("repository password is required")
+	// ErrDestinationConflict indicates that multiple logical paths identify one
+	// managed destination or that an add candidate changed physical identity.
+	ErrDestinationConflict = errors.New("managed destination conflict")
 	// ErrProtectedLocalState indicates that a managed input or destination
 	// overlaps or aliases susu's machine-local binding, lock, or state staging directory.
 	ErrProtectedLocalState = errors.New("path overlaps susu local state")
@@ -112,8 +115,13 @@ type candidate struct {
 	root     string
 	relative string
 	logical  string
-	mode     os.FileMode
+	identity fs.FileInfo
 	source   string
+}
+
+type managedFileIdentity struct {
+	logical string
+	info    fs.FileInfo
 }
 
 type addIgnorePolicy struct {
@@ -141,9 +149,17 @@ type controlBoundary struct {
 	repository *repositoryBoundary
 }
 
+type addHooks struct {
+	beforeCandidateRead func(logical string) error
+}
+
 // Add starts managing regular files. Directories are recursively expanded into
 // individual entries; existing entries are skipped without overwriting storage.
 func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
+	return s.addWithHooks(inputs, options, addHooks{})
+}
+
+func (s *Service) addWithHooks(inputs []string, options AddOptions, hooks addHooks) (AddResult, error) {
 	if len(inputs) == 0 {
 		return AddResult{}, errors.New("add requires at least one path")
 	}
@@ -172,12 +188,40 @@ func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
 		sources[entry.Source] = entry.Path
 	}
 
+	hasNewLogical := false
+	for _, item := range candidates {
+		if _, exists := managed[item.logical]; !exists {
+			hasNewLogical = true
+			break
+		}
+	}
+	if !hasNewLogical {
+		result := AddResult{AlreadyManaged: make([]string, 0, len(candidates))}
+		for _, item := range candidates {
+			result.AlreadyManaged = append(result.AlreadyManaged, item.logical)
+		}
+		return result, nil
+	}
+
+	managedIdentities, err := s.loadManagedFileIdentities(current.Entries)
+	if err != nil {
+		return AddResult{}, err
+	}
 	result := AddResult{}
 	newCandidates := make([]candidate, 0, len(candidates))
 	for _, item := range candidates {
 		if _, exists := managed[item.logical]; exists {
 			result.AlreadyManaged = append(result.AlreadyManaged, item.logical)
 			continue
+		}
+		if _, exists := physicalIdentityOwner(item.identity, managedIdentities); exists {
+			result.AlreadyManaged = append(result.AlreadyManaged, item.logical)
+			continue
+		}
+		for _, existing := range newCandidates {
+			if os.SameFile(item.identity, existing.identity) {
+				return AddResult{}, destinationConflict(existing.logical, item.logical)
+			}
 		}
 		if existingPath, exists := sources[item.source]; exists {
 			return AddResult{}, fmt.Errorf("repository source %q for %q is already used by %q", item.source, item.logical, existingPath)
@@ -218,7 +262,7 @@ func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
 		defer cryptox.ZeroBytes(masterKey)
 	}
 
-	if err := preflightCandidates(newCandidates, boundary); err != nil {
+	if err := s.preflightCandidates(newCandidates, current.Entries, boundary); err != nil {
 		return AddResult{}, err
 	}
 
@@ -229,7 +273,17 @@ func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
 		}
 	}
 	for _, item := range newCandidates {
-		contents, openedMode, err := readCandidate(item, boundary)
+		if hooks.beforeCandidateRead != nil {
+			if err := hooks.beforeCandidateRead(item.logical); err != nil {
+				rollback()
+				return AddResult{}, fmt.Errorf("run pre-read hook for %q: %w", item.logical, err)
+			}
+		}
+		if err := s.preflightCandidates(newCandidates, current.Entries, boundary); err != nil {
+			rollback()
+			return AddResult{}, fmt.Errorf("recheck add candidates before reading %q: %w", item.logical, err)
+		}
+		contents, openedMode, err := s.readCandidate(item, current.Entries, boundary)
 		if err != nil {
 			rollback()
 			return AddResult{}, fmt.Errorf("read %q: %w", item.absolute, err)
@@ -269,6 +323,10 @@ func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
 		result.Added = append(result.Added, item.logical)
 	}
 
+	if err := s.preflightCandidates(newCandidates, current.Entries, boundary); err != nil {
+		rollback()
+		return AddResult{}, fmt.Errorf("recheck add candidates before committing susu.json: %w", err)
+	}
 	if err := repo.SaveManifest(updated); err != nil {
 		if !errors.Is(err, manifest.ErrCommitted) {
 			rollback()
@@ -423,14 +481,70 @@ type ApplyResult struct {
 	Skipped []string
 }
 
-func (s *Service) ensureApplyDestinationsOutside(entries []manifest.Entry, boundary *controlBoundary) error {
+type applyDestination struct {
+	entry    manifest.Entry
+	root     string
+	relative string
+}
+
+type applyHooks struct {
+	afterSourcePreflight     func() error
+	beforeDestinationReplace func(logical string) error
+}
+
+func (s *Service) resolveApplyDestinations(entries []manifest.Entry) ([]applyDestination, error) {
+	destinations := make([]applyDestination, 0, len(entries))
 	for _, entry := range entries {
 		rootPath, relative, err := s.paths.SplitLogical(entry.Path)
 		if err != nil {
-			return fmt.Errorf("resolve destination %q: %w", entry.Path, err)
+			return nil, fmt.Errorf("resolve destination %q: %w", entry.Path, err)
 		}
-		if err := boundary.ensureOutside(filepath.Join(rootPath, relative)); err != nil {
-			return fmt.Errorf("apply destination %q: %w; remove the protected entry with 'susu rm <path>' before applying", entry.Path, err)
+		destinations = append(destinations, applyDestination{entry: entry, root: rootPath, relative: relative})
+	}
+	return destinations, nil
+}
+
+func (s *Service) ensureApplyDestinationsSafe(destinations []applyDestination, boundary *controlBoundary) error {
+	for _, destination := range destinations {
+		if err := boundary.ensureOutside(filepath.Join(destination.root, destination.relative)); err != nil {
+			return fmt.Errorf("apply destination %q: %w; remove the protected entry with 'susu rm <path>' before applying", destination.entry.Path, err)
+		}
+	}
+	return s.ensureNoApplyDestinationConflicts(destinations)
+}
+
+func (s *Service) ensureNoApplyDestinationConflicts(destinations []applyDestination) error {
+	owners := make(map[string]string, len(destinations))
+	for _, destination := range destinations {
+		comparisonRoot, err := canonicalProspectivePath(destination.root)
+		if err != nil {
+			return fmt.Errorf("resolve destination root for %q: %w", destination.entry.Path, err)
+		}
+		comparison, err := paths.ComparisonKey(filepath.Join(comparisonRoot, destination.relative), s.platform)
+		if err != nil {
+			return fmt.Errorf("compare destination %q: %w", destination.entry.Path, err)
+		}
+		if existing, exists := owners[comparison]; exists {
+			return destinationConflict(existing, destination.entry.Path)
+		}
+		owners[comparison] = destination.entry.Path
+	}
+
+	comparisons := make([]string, 0, len(owners))
+	for comparison := range owners {
+		comparisons = append(comparisons, comparison)
+	}
+	sort.Strings(comparisons)
+	for _, comparison := range comparisons {
+		for parent := filepath.Dir(comparison); ; {
+			if owner, exists := owners[parent]; exists {
+				return destinationConflict(owner, owners[comparison])
+			}
+			next := filepath.Dir(parent)
+			if next == parent {
+				break
+			}
+			parent = next
 		}
 	}
 	return nil
@@ -440,6 +554,10 @@ func (s *Service) ensureApplyDestinationsOutside(entries []manifest.Entry, bound
 // preflights every applicable source and authenticates every ciphertext, so
 // repository corruption cannot cause a half-applied invocation.
 func (s *Service) Apply(passwordProvider PasswordProvider) (ApplyResult, error) {
+	return s.applyWithHooks(passwordProvider, applyHooks{})
+}
+
+func (s *Service) applyWithHooks(passwordProvider PasswordProvider, hooks applyHooks) (ApplyResult, error) {
 	repo, current, release, err := s.openLocked()
 	if err != nil {
 		return ApplyResult{}, err
@@ -463,7 +581,11 @@ func (s *Service) Apply(passwordProvider PasswordProvider) (ApplyResult, error) 
 	if err != nil {
 		return result, err
 	}
-	if err := s.ensureApplyDestinationsOutside(applicable, boundary); err != nil {
+	destinations, err := s.resolveApplyDestinations(applicable)
+	if err != nil {
+		return result, err
+	}
+	if err := s.ensureApplyDestinationsSafe(destinations, boundary); err != nil {
 		return result, err
 	}
 
@@ -475,18 +597,20 @@ func (s *Service) Apply(passwordProvider PasswordProvider) (ApplyResult, error) 
 		}
 		defer cryptox.ZeroBytes(masterKey)
 	}
+	if err := s.ensureApplyDestinationsSafe(destinations, boundary); err != nil {
+		return result, err
+	}
 
 	type preparedFile struct {
 		entry         manifest.Entry
 		root          string
 		relative      string
-		comparison    string
 		contents      []byte
 		source        *os.File
 		fileMode      os.FileMode
 		directoryMode os.FileMode
 	}
-	prepared := make([]preparedFile, 0, len(applicable))
+	prepared := make([]preparedFile, 0, len(destinations))
 	defer func() {
 		for index := range prepared {
 			if prepared[index].source != nil {
@@ -499,7 +623,8 @@ func (s *Service) Apply(passwordProvider PasswordProvider) (ApplyResult, error) 
 	}()
 
 	var sensitiveBytes int64
-	for _, entry := range applicable {
+	for _, destination := range destinations {
+		entry := destination.entry
 		var contents []byte
 		var sourceFile *os.File
 		fileMode := os.FileMode(0o644)
@@ -527,66 +652,31 @@ func (s *Service) Apply(passwordProvider PasswordProvider) (ApplyResult, error) 
 				return result, err
 			}
 		}
-		rootPath, relative, err := s.paths.SplitLogical(entry.Path)
-		if err != nil {
-			if sourceFile != nil {
-				_ = sourceFile.Close()
-			}
-			if entry.Sensitive {
-				cryptox.ZeroBytes(contents)
-			}
-			return result, fmt.Errorf("resolve destination %q: %w", entry.Path, err)
-		}
-		comparisonRoot, err := canonicalProspectivePath(rootPath)
-		if err != nil {
-			if sourceFile != nil {
-				_ = sourceFile.Close()
-			}
-			if entry.Sensitive {
-				cryptox.ZeroBytes(contents)
-			}
-			return result, fmt.Errorf("resolve destination root for %q: %w", entry.Path, err)
-		}
 		prepared = append(prepared, preparedFile{
-			entry: entry, root: rootPath, relative: relative,
-			comparison: filepath.Join(comparisonRoot, relative),
-			contents:   contents, source: sourceFile,
+			entry: entry, root: destination.root, relative: destination.relative,
+			contents: contents, source: sourceFile,
 			fileMode: fileMode, directoryMode: directoryMode,
 		})
 	}
-	destinationOwners := make(map[string]string, len(prepared))
-	for _, item := range prepared {
-		if existing, exists := destinationOwners[item.comparison]; exists {
-			return result, fmt.Errorf("destination conflict between %q and %q", existing, item.entry.Path)
-		}
-		destinationOwners[item.comparison] = item.entry.Path
-	}
-	destinations := make([]string, 0, len(destinationOwners))
-	for destination := range destinationOwners {
-		destinations = append(destinations, destination)
-	}
-	sort.Strings(destinations)
-	for _, destination := range destinations {
-		for parent := filepath.Dir(destination); ; {
-			if owner, exists := destinationOwners[parent]; exists {
-				return result, fmt.Errorf("destination conflict between %q and %q", owner, destinationOwners[destination])
-			}
-			next := filepath.Dir(parent)
-			if next == parent {
-				break
-			}
-			parent = next
-		}
-	}
 
-	if err := s.ensureApplyDestinationsOutside(applicable, boundary); err != nil {
+	if hooks.afterSourcePreflight != nil {
+		if err := hooks.afterSourcePreflight(); err != nil {
+			return result, fmt.Errorf("run post-source-preflight hook: %w", err)
+		}
+	}
+	if err := s.ensureApplyDestinationsSafe(destinations, boundary); err != nil {
 		return result, err
 	}
 
 	for index := range prepared {
 		item := &prepared[index]
-		if err := boundary.ensureOutside(filepath.Join(item.root, item.relative)); err != nil {
-			return result, fmt.Errorf("apply destination %q after restoring %d file(s): %w; remove the protected entry with 'susu rm <path>' before applying", item.entry.Path, len(result.Applied), err)
+		if hooks.beforeDestinationReplace != nil {
+			if err := hooks.beforeDestinationReplace(item.entry.Path); err != nil {
+				return result, fmt.Errorf("run pre-replacement hook for %q after restoring %d file(s): %w", item.entry.Path, len(result.Applied), err)
+			}
+		}
+		if err := s.ensureApplyDestinationsSafe(destinations, boundary); err != nil {
+			return result, fmt.Errorf("recheck apply destinations after restoring %d file(s): %w", len(result.Applied), err)
 		}
 		write := func(writer io.Writer) error {
 			if item.entry.Sensitive {
@@ -734,7 +824,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *c
 				if !entryInfo.Mode().IsRegular() {
 					return nil
 				}
-				return s.addCandidate(byLogical, bySource, rootPath, childRelative, childAbsolute, entryInfo.Mode(), sensitive, boundary, ignorePolicy)
+				return s.addCandidate(byLogical, bySource, rootPath, childRelative, childAbsolute, sensitive, boundary, ignorePolicy)
 			})
 			closeErr := root.Close()
 			if err != nil {
@@ -752,7 +842,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *c
 		if err := root.Close(); err != nil {
 			return nil, fmt.Errorf("close path root for %q: %w", absolute, err)
 		}
-		if err := s.addCandidate(byLogical, bySource, rootPath, relative, absolute, info.Mode(), sensitive, boundary, ignorePolicy); err != nil {
+		if err := s.addCandidate(byLogical, bySource, rootPath, relative, absolute, sensitive, boundary, ignorePolicy); err != nil {
 			return nil, err
 		}
 	}
@@ -765,7 +855,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *c
 	return result, nil
 }
 
-func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[string]string, root, relative, absolute string, mode os.FileMode, sensitive bool, boundary *controlBoundary, ignorePolicy addIgnorePolicy) error {
+func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[string]string, root, relative, absolute string, sensitive bool, boundary *controlBoundary, ignorePolicy addIgnorePolicy) error {
 	if err := boundary.ensureOutside(absolute); err != nil {
 		return fmt.Errorf("add discovered file %q: %w", absolute, err)
 	}
@@ -784,13 +874,24 @@ func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[stri
 	if err != nil {
 		return err
 	}
+	if _, exists := byLogical[logical]; exists {
+		return nil
+	}
 	if existingLogical, exists := bySource[source]; exists && existingLogical != logical {
 		return fmt.Errorf("paths %q and %q map to the same repository source %q", existingLogical, logical, source)
 	}
-	bySource[source] = logical
-	if _, exists := byLogical[logical]; !exists {
-		byLogical[logical] = candidate{absolute: absolute, root: root, relative: relative, logical: logical, mode: mode, source: source}
+
+	item := candidate{absolute: absolute, root: root, relative: relative, logical: logical, source: source}
+	file, info, err := openCandidate(item, boundary)
+	if err != nil {
+		return fmt.Errorf("inspect discovered file %q: %w", absolute, err)
 	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close discovered file %q: %w", absolute, err)
+	}
+	item.identity = info
+	bySource[source] = logical
+	byLogical[logical] = item
 	return nil
 }
 
@@ -855,25 +956,87 @@ func excluded(entry manifest.Entry, platform string) bool {
 	return false
 }
 
-func preflightCandidates(candidates []candidate, boundary *controlBoundary) error {
+func (s *Service) loadManagedFileIdentities(entries []manifest.Entry) ([]managedFileIdentity, error) {
+	identities := make([]managedFileIdentity, 0, len(entries))
+	for _, entry := range entries {
+		rootPath, relative, err := s.paths.SplitLogical(entry.Path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve managed destination %q: %w", entry.Path, err)
+		}
+		absolute := filepath.Join(rootPath, relative)
+		info, err := os.Lstat(absolute)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("inspect managed destination %q: %w", entry.Path, err)
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		identities = append(identities, managedFileIdentity{logical: entry.Path, info: info})
+	}
+	return identities, nil
+}
+
+func physicalIdentityOwner(info fs.FileInfo, identities []managedFileIdentity) (string, bool) {
+	if info == nil {
+		return "", false
+	}
+	for _, identity := range identities {
+		if os.SameFile(info, identity.info) {
+			return identity.logical, true
+		}
+	}
+	return "", false
+}
+
+func destinationConflict(first, second string) error {
+	return fmt.Errorf("%w between %q and %q", ErrDestinationConflict, first, second)
+}
+
+func (s *Service) preflightCandidates(candidates []candidate, entries []manifest.Entry, boundary *controlBoundary) error {
+	managedIdentities, err := s.loadManagedFileIdentities(entries)
+	if err != nil {
+		return err
+	}
+	openedIdentities := make([]managedFileIdentity, 0, len(candidates))
 	for _, item := range candidates {
-		file, _, err := openCandidate(item, boundary)
+		file, info, err := openCandidate(item, boundary)
 		if err != nil {
 			return fmt.Errorf("preflight %q: %w", item.absolute, err)
+		}
+		if existing, exists := physicalIdentityOwner(info, managedIdentities); exists {
+			_ = file.Close()
+			return destinationConflict(existing, item.logical)
+		}
+		if existing, exists := physicalIdentityOwner(info, openedIdentities); exists {
+			_ = file.Close()
+			return destinationConflict(existing, item.logical)
 		}
 		if err := file.Close(); err != nil {
 			return fmt.Errorf("close preflight source %q: %w", item.absolute, err)
 		}
+		openedIdentities = append(openedIdentities, managedFileIdentity{logical: item.logical, info: info})
 	}
 	return nil
 }
 
-func readCandidate(item candidate, boundary *controlBoundary) ([]byte, os.FileMode, error) {
-	file, mode, err := openCandidate(item, boundary)
+func (s *Service) readCandidate(item candidate, entries []manifest.Entry, boundary *controlBoundary) ([]byte, os.FileMode, error) {
+	file, info, err := openCandidate(item, boundary)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer file.Close()
+
+	managedIdentities, err := s.loadManagedFileIdentities(entries)
+	if err != nil {
+		return nil, 0, err
+	}
+	if existing, exists := physicalIdentityOwner(info, managedIdentities); exists {
+		return nil, 0, destinationConflict(existing, item.logical)
+	}
+
 	contents, err := io.ReadAll(io.LimitReader(file, maxManagedFileSize+1))
 	if err != nil {
 		return nil, 0, err
@@ -881,35 +1044,39 @@ func readCandidate(item candidate, boundary *controlBoundary) ([]byte, os.FileMo
 	if int64(len(contents)) > maxManagedFileSize {
 		return nil, 0, fmt.Errorf("file exceeds v0.1 limit of %d bytes", maxManagedFileSize)
 	}
-	return contents, mode, nil
+	return contents, info.Mode(), nil
 }
 
-func openCandidate(item candidate, boundary *controlBoundary) (*os.File, os.FileMode, error) {
+func openCandidate(item candidate, boundary *controlBoundary) (*os.File, fs.FileInfo, error) {
 	if err := boundary.ensureOutside(item.absolute); err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 	file, err := safefs.OpenRegular(item.root, item.relative)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 	info, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
-		return nil, 0, err
+		return nil, nil, err
 	}
 	if !info.Mode().IsRegular() {
 		_ = file.Close()
-		return nil, 0, errors.New("path changed and is no longer a regular file")
+		return nil, nil, errors.New("path changed and is no longer a regular file")
 	}
 	if err := boundary.ensureOpenedFileOutside(item.absolute, info); err != nil {
 		_ = file.Close()
-		return nil, 0, err
+		return nil, nil, err
+	}
+	if item.identity != nil && !os.SameFile(item.identity, info) {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("%w: add candidate %q changed physical identity while the command was running", ErrDestinationConflict, item.logical)
 	}
 	if info.Size() > maxManagedFileSize {
 		_ = file.Close()
-		return nil, 0, fmt.Errorf("file is %d bytes, v0.1 limit is %d", info.Size(), maxManagedFileSize)
+		return nil, nil, fmt.Errorf("file is %d bytes, v0.1 limit is %d", info.Size(), maxManagedFileSize)
 	}
-	return file, info.Mode(), nil
+	return file, info, nil
 }
 
 func openStoredFile(repo *repository.Repository, source string) (*os.File, os.FileMode, error) {

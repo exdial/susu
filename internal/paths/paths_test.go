@@ -245,6 +245,142 @@ func TestNormalizeAndResolveRoundTrip(t *testing.T) {
 	}
 }
 
+func TestComparisonKeyDarwinAliases(t *testing.T) {
+	tests := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{"ASCII case", "/Users/Alice/Library/Preferences", "/users/alice/library/preferences"},
+		{"NFC and NFD", "/Users/example/caf\u00e9", "/Users/example/cafe\u0301"},
+		{"case and normalization", "/Users/example/\u00c9COLE", "/users/EXAMPLE/e\u0301cole"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			first, err := ComparisonKey(test.first, "darwin")
+			if err != nil {
+				t.Fatalf("ComparisonKey(%q, darwin): %v", test.first, err)
+			}
+			second, err := ComparisonKey(test.second, "darwin")
+			if err != nil {
+				t.Fatalf("ComparisonKey(%q, darwin): %v", test.second, err)
+			}
+			if first != second {
+				t.Fatalf("ComparisonKey() returned distinct Darwin aliases %q and %q", first, second)
+			}
+		})
+	}
+}
+
+func TestComparisonKeyLinuxPreservesComponentSpelling(t *testing.T) {
+	tests := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{"ASCII case", "/home/example/Config", "/home/example/config"},
+		{"NFC and NFD", "/home/example/caf\u00e9", "/home/example/cafe\u0301"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			first, err := ComparisonKey(test.first, "linux")
+			if err != nil {
+				t.Fatalf("ComparisonKey(%q, linux): %v", test.first, err)
+			}
+			second, err := ComparisonKey(test.second, "linux")
+			if err != nil {
+				t.Fatalf("ComparisonKey(%q, linux): %v", test.second, err)
+			}
+			if first != test.first || second != test.second {
+				t.Fatalf("ComparisonKey() changed Linux spelling: got %q and %q", first, second)
+			}
+			if first == second {
+				t.Fatalf("ComparisonKey() conflated distinct Linux paths %q and %q", first, second)
+			}
+		})
+	}
+}
+
+func TestComparisonKeyCleansAbsolutePaths(t *testing.T) {
+	tests := []struct {
+		platform string
+		want     string
+	}{
+		{"darwin", "/users/example/config/file"},
+		{"linux", "/Users/example/Config/file"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.platform, func(t *testing.T) {
+			got, err := ComparisonKey("/Users/example/one/../Config/./file", test.platform)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("ComparisonKey() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestComparisonKeyPreservesComponentBoundaries(t *testing.T) {
+	first, err := ComparisonKey("/A/BC", "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ComparisonKey("/AB/C", "darwin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if first != "/a/bc" || second != "/ab/c" {
+		t.Fatalf("ComparisonKey() returned %q and %q", first, second)
+	}
+	if first == second {
+		t.Fatalf("ComparisonKey() did not preserve component boundaries")
+	}
+}
+
+func TestComparisonKeyRejectsInvalidInput(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		platform string
+	}{
+		{"empty path", "", "linux"},
+		{"relative path", "relative/path", "linux"},
+		{"NUL", "/tmp/nul\x00path", "darwin"},
+		{"malformed UTF-8 on Darwin", "/tmp/invalid-\xff", "darwin"},
+		{"empty platform", "/tmp/file", ""},
+		{"unsupported platform", "/tmp/file", "windows"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ComparisonKey(test.filename, test.platform)
+			if !errors.Is(err, ErrInvalidPath) {
+				t.Fatalf("ComparisonKey(%q, %q) error = %v, want ErrInvalidPath", test.filename, test.platform, err)
+			}
+			if got != "" {
+				t.Fatalf("ComparisonKey(%q, %q) = %q on error, want empty key", test.filename, test.platform, got)
+			}
+		})
+	}
+}
+
+func TestComparisonKeyLinuxPreservesNonUTF8Bytes(t *testing.T) {
+	filename := "/tmp/invalid-\xff"
+	got, err := ComparisonKey(filename, "linux")
+	if err != nil {
+		t.Fatalf("ComparisonKey(non-UTF-8 Linux path): %v", err)
+	}
+	if got != filename {
+		t.Fatalf("ComparisonKey(non-UTF-8 Linux path) = %q, want %q", got, filename)
+	}
+}
+
 func mustResolverAt(t *testing.T, home, xdgConfigHome, workingDirectory string) *Resolver {
 	t.Helper()
 	resolver, err := NewResolverAt(home, xdgConfigHome, workingDirectory)
