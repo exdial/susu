@@ -46,7 +46,7 @@ The Go packages follow the operational boundaries rather than the command names 
 | `internal/cli` | Command and flag parsing, help text, stdout/stderr formatting, and no-echo password input from `/dev/tty` |
 | `internal/app` | Command semantics, platform filtering, operation ordering, rollback decisions, apply preflight, and orchestration of state and repository locks |
 | `internal/state` | Machine-local repository binding, strict state decoding, atomic state replacement, permissions, and the per-state-home advisory lock |
-| `internal/paths` | Lexical conversion between concrete filesystem paths and portable logical destinations |
+| `internal/paths` | Lexical conversion between concrete filesystem paths and portable logical destinations, plus comparison-only platform keys for apply safety |
 | `internal/manifest` | Manifest schema, structural validation, deterministic source mapping, ordering, and atomic `susu.json` replacement |
 | `internal/repository` | Git-root validation, repository lock placement, storage-directory checks, and confined source access |
 | `internal/safefs` | Descriptor-relative, no-follow open/create/link/rename/remove operations on macOS and Linux |
@@ -171,6 +171,8 @@ The shell usually expands an unquoted `~` and wildcard patterns before invoking 
 
 Only `XDG_CONFIG_HOME` participates in managed logical destinations. `XDG_STATE_HOME` selects local state storage; `XDG_DATA_HOME` and `XDG_CACHE_HOME` do not define managed path forms. Logical paths under `~/.config` are rejected by the manifest model in favor of `${XDG_CONFIG_HOME}/...`. With a custom XDG config root, `$HOME/.config/...` is consequently outside the supported logical config representation.
 
+Logical normalization remains platform-independent because entries must be portable, paths may be absent, and sensitive encryption authenticates the exact logical path as AAD. Runtime destination conflict comparison is therefore a separate operation. It canonicalizes only the configured HOME or XDG root, appends the logical relative suffix without following a destination leaf or parent, and then derives a platform key. Darwin keys transform each component independently through canonical decomposition, locale-independent Unicode case folding, and canonical composition; malformed UTF-8 fails closed. Linux keys preserve cleaned component spelling. This comparison never changes manifest identities, `show`/`rm` lookup, source mapping, or encryption AAD.
+
 ### Deterministic storage mapping
 
 For a non-empty relative suffix `R`, source mapping is fixed:
@@ -287,11 +289,16 @@ Directory expansion has no user-configurable ignore mechanism. It has one built-
 ```mermaid
 flowchart TB
     Manifest[Load and validate manifest] --> Filter[Filter platform exclusions]
-    Filter --> ControlGuard[Reject protected control-root destinations]
-    ControlGuard --> Unlock[Unlock once if sensitive data is needed]
-    Unlock --> Preflight[Open sources and authenticate ciphertext]
-    Preflight --> Conflicts[Check concrete destination conflicts]
-    Conflicts --> Replace[Stage, sync, and rename each destination]
+    Filter --> InitialSafety[Check protected roots and destination aliases]
+    InitialSafety --> Unlock[Unlock once if sensitive data is needed]
+    Unlock --> UnlockSafety[Repeat complete destination safety check]
+    UnlockSafety --> Preflight[Open sources and authenticate ciphertext]
+    Preflight --> PreflightSafety[Repeat complete destination safety check]
+    PreflightSafety --> Recheck[Recheck complete destination set]
+    Recheck --> Replace[Stage, sync, and rename one destination]
+    Replace --> More{More destinations?}
+    More -->|Yes| Recheck
+    More -->|No| Done[Return result]
 ```
 
 The diagram shows `apply`; other commands use the same validated binding, state lock, repository lock, and manifest boundary.
@@ -310,15 +317,17 @@ For one invocation, `add`:
 2. opens the bound repository and loads the manifest under both locks;
 3. rejects inputs that overlap or contain the private state directory, active worktree, or Git common directory;
 4. discovers and sorts all regular-file candidates;
-5. separates already-managed identities from new identities;
-6. unlocks or initializes repository crypto once when at least one new sensitive entry exists;
-7. revalidates every new candidate command-wide after the password callback;
-8. reads each new candidate through a separately revalidated no-follow descriptor, with a 512 MiB per-file limit;
-9. encrypts sensitive bytes in memory or retains public bytes;
-10. atomically installs each new repository source without replacing an existing path; and
-11. atomically replaces `susu.json` after all new sources are installed.
+5. classifies exact logical entries and different logical candidates that share filesystem identity with an existing managed regular leaf as already managed;
+6. rejects the complete invocation if two new candidates share one physical file identity;
+7. unlocks or initializes repository crypto once when at least one new sensitive entry exists;
+8. revalidates every new candidate command-wide after the password callback;
+9. repeats command-wide physical-identity and boundary checks before each read, then reads through the same validated no-follow descriptor with a 512 MiB per-file limit;
+10. encrypts sensitive bytes in memory or retains public bytes;
+11. atomically installs each new repository source without replacing an existing path;
+12. rechecks every candidate once more before the manifest transition; and
+13. atomically replaces `susu.json` after all new sources are installed.
 
-Already-managed entries keep their original source bytes, sensitivity, and exclusions. A sensitive invocation containing only already-managed paths does not prompt for a password. Existing unreferenced data at a candidate's deterministic source path is treated as a collision and is not overwritten.
+Physical identity uses `os.SameFile` metadata obtained from opened candidate descriptors. Existing managed leaves are inspected with `Lstat`: a regular hard link, case alias, or normalization alias exposed by the filesystem is recognized, while a leaf symlink does not make its target already managed. Already-managed entries keep their original source bytes, sensitivity, and exclusions. A sensitive invocation containing only exact or physical aliases of already-managed paths does not prompt for a password. Existing unreferenced data at a candidate's deterministic source path is treated as a collision and is not overwritten. A late identity conflict rolls back repository sources created earlier in that invocation.
 
 The no-overwrite source install uses a random same-directory temporary file, file synchronization, and an atomic hard link to the final name. This preserves the rule that `add` starts management rather than silently updating an existing snapshot.
 
@@ -348,21 +357,20 @@ No plaintext temporary file is created by `show`. Standard output is the intenti
 
 `apply` operates on a logical-path-sorted view of the manifest:
 
-1. entries excluded for `runtime.GOOS` are recorded as skipped and removed from further processing;
-2. every applicable logical destination is resolved and rejected if it overlaps the private state directory, active worktree, or Git common directory;
-3. the repository is unlocked once if any remaining entry is sensitive;
+1. entries excluded for the selected platform are recorded as skipped and removed from further processing;
+2. every applicable logical destination is resolved, checked against protected control roots, and compared with every other applicable destination;
+3. the repository is unlocked once if any remaining entry is sensitive, followed immediately by another complete destination check;
 4. every applicable source is opened through a stable no-follow descriptor;
 5. each sensitive source is read, authenticated, and decrypted in memory before any destination changes;
 6. public source size and mode are checked while its descriptor remains open;
-7. exact lexical and ancestor conflicts between concrete destination strings are rejected;
-8. all applicable destinations are rechecked command-wide after source preflight; and
-9. each destination is checked once more immediately before it is staged and atomically renamed in logical-path order.
+7. all applicable destinations are checked again after source/authentication preflight; and
+8. the complete destination set is rechecked before each destination is staged and atomically renamed in logical-path order.
 
-Platform filtering and the first protected-control-root destination check occur before password requirements and source access. An excluded sensitive entry therefore does not cause a password prompt by itself, while an applicable legacy entry already targeting a protected root fails before an unlock attempt. The later command-wide and per-destination checks catch namespace changes during the invocation before protected writes.
+Platform filtering and the first protected-control-root and alias checks occur before password requirements and source access. An excluded sensitive entry therefore does not cause a password prompt by itself, while an applicable legacy entry already targeting a protected root or alias conflict fails before an unlock attempt. At every checkpoint, all protected-root checks complete before alias comparison so the protected error has priority. The later command-wide checks catch root namespace changes before protected or conflicting writes.
 
 Public sources are limited to 1 GiB by their preflight file size and then streamed from the retained descriptor during replacement. Sensitive serialized sources are read with the same 1 GiB limit. Decrypted sensitive plaintext remains in memory for the full preflight, with a 1 GiB aggregate limit across applicable sensitive entries.
 
-Destination conflict checks resolve existing root ancestors, then compare exact path strings and lexical ancestors. They reject identical strings and a destination string that would be a file ancestor of another. They do not collapse case or Unicode-normalization aliases; on a filesystem where distinct spellings name the same object, such entries can pass preflight and be applied sequentially.
+Destination conflict checks canonicalize each configured logical root but do not resolve the complete destination. They compare exact and ancestor keys after component-wise Unicode canonical normalization and locale-independent case folding on Darwin; Linux preserves spelling. Darwin therefore fails closed for case or canonical-normalization variants even on a case-sensitive volume, while Linux retains its case-sensitive model. Processing components separately preserves path boundaries. Root-only canonicalization keeps a final symlink distinct from its target so normal replacement semantics remain unchanged.
 
 For each destination, `apply`:
 
@@ -421,11 +429,12 @@ The lock files persist after use, while the kernel lock is released when the des
 Path safety is implemented in layers:
 
 1. Logical and repository-relative paths receive lexical canonicalization and containment checks.
-2. Managed source and destination operations are split into a trusted root plus a local relative path.
-3. On macOS and Linux, each component below that root is opened descriptor-relatively with `openat`, `O_NOFOLLOW`, and directory/type checks.
-4. The same regular-file descriptor that passes validation is read.
-5. Create, link, rename, and remove operations use a stable parent-directory descriptor, so replacing a pathname with a symlink after the parent is opened does not redirect the operation.
-6. Repository storage roots are required to be real directories, and repository sources are required to be regular non-symlink files.
+2. Apply-only platform comparison keys detect destination aliases without changing portable identities.
+3. Managed source and destination operations are split into a trusted root plus a local relative path.
+4. On macOS and Linux, each component below that root is opened descriptor-relatively with `openat`, `O_NOFOLLOW`, and directory/type checks.
+5. The same regular-file descriptor that passes validation and identity checks is read.
+6. Create, link, rename, and remove operations use a stable parent-directory descriptor, so replacing a pathname with a symlink after the parent is opened does not redirect the operation.
+7. Repository storage roots are required to be real directories, and repository sources are required to be regular non-symlink files.
 
 The configured HOME or XDG root itself may be a symlink. It is resolved once before opening the root descriptor; symlinks below it are not followed. This supports environments where the entire home or config root is redirected while preventing an entry from traversing an unexpected nested link.
 
@@ -463,7 +472,7 @@ The implemented model has these deliberate or practical limits:
 - Restore overwrites applicable destinations without conflict detection against local contents, backups, or a command-wide rollback.
 - Entries represent regular files only. Symlinks, special files, empty directories, and directory metadata are not preserved.
 - Recursive input and destination application reject canonical or physical overlap with the private state directory, active worktree, and Git common directory. The implementation does not perform a global reverse-inode search for arbitrary regular-file hard links into repository or Git trees; current destination replacement installs a new inode rather than writing through an existing hard link.
-- Destination conflict detection is lexical; case- or Unicode-normalization-equivalent names can alias on some filesystems.
+- Darwin apply comparison deliberately rejects case- or canonically equivalent destination spellings even on a case-sensitive macOS volume. Linux comparison preserves spelling and does not emulate macOS behavior.
 - Public mode portability is limited to non-executable versus executable; sensitive destinations are always `0600`.
 - `add` reads one complete input file into memory. Sensitive `show` reads and decrypts one complete envelope in memory. `apply` retains all applicable sensitive plaintext through preflight.
 - Input files are limited to 512 MiB. `apply` sources and sensitive `show` sources are limited to 1 GiB as described above; public `show` has no explicit size cap.

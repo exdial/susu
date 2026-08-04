@@ -22,10 +22,11 @@ For entries marked `sensitive`, the implementation aims to:
 5. use a memory-hard password KDF and established authenticated-encryption primitives;
 6. avoid persisting the password, password-derived key, or plaintext repository master key;
 7. limit passwords, keys, and decrypted file buffers to the command invocation that needs them, with best-effort in-place zeroization;
-8. confine managed source and destination operations beneath validated filesystem roots without following symlink components; and
-9. use atomic per-file installation or replacement so ordinary write failures do not expose partially written final files.
+8. confine managed source and destination operations beneath validated filesystem roots without following symlink components;
+9. reject multiple logical entries that identify one physical add candidate or one applicable destination under the selected platform's comparison model; and
+10. use atomic per-file installation or replacement so ordinary write failures do not expose partially written final files.
 
-Independently of entry sensitivity, the active private `susu` state directory, repository worktree, and Git common administrative directory are protected local control roots. `add` cannot capture exact, descendant, ancestor, canonical, physical, or case aliases of those roots, and opened-file identity checks additionally protect hard-linked local-state files. Applicable `apply` destinations cannot target any protected root. These goals concern `susu`'s own behavior. They do not make a compromised host, untrusted Git state, plaintext destination, or weak password safe.
+Independently of entry sensitivity, the active private `susu` state directory, repository worktree, and Git common administrative directory are protected local control roots. `add` cannot capture exact, descendant, ancestor, canonical, physical, or case aliases of those roots, and opened-file identity checks additionally protect hard-linked local-state files. Applicable `apply` destinations cannot target any protected root or alias one another under the runtime comparison model. These goals concern `susu`'s own behavior. They do not make a compromised host, untrusted Git state, plaintext destination, or weak password safe.
 
 ## Assets and trust boundaries
 
@@ -51,7 +52,7 @@ The relevant trust boundaries are:
 | `HOME` and `XDG_CONFIG_HOME` | Authorized plaintext roots. `apply` is expected to create usable plaintext files there, except beneath the runtime-specific protected control roots. |
 | Local `susu` state directory | Protected control root containing the active binding, local lock, and state staging files. Its finite file identities are also protected from hard-linked `add` aliases. |
 | Active repository worktree and Git common directory | Protected control roots containing portable snapshots, manifest state, Git metadata, locks, and staging files. Exact, descendant, ancestor, canonical, physical, and filesystem-resolved case aliases are rejected for `add` and applicable `apply`. Linked worktrees can have two disjoint protected roots. |
-| Protected-root validation timing | Input/discovery overlaps fail before password processing. After an optional `add` password callback, every new candidate is rechecked before any candidate content or repository source is written; each source descriptor is checked again before its own read. `apply` checks after platform filtering, after source preflight, and immediately before each replacement. |
+| Filesystem-identity and destination validation timing | Input/discovery overlaps and initial add identity conflicts fail before password processing. After an optional `add` password callback, every new candidate is rechecked before any candidate content or repository source is written, command-wide before each descriptor read, and once more before manifest commit. `apply` checks the complete applicable destination set after platform filtering, after unlock, after source/authentication preflight, and immediately before each replacement; protected-root errors have priority over alias errors. |
 | Filesystem and random source | Expected to implement the requested Unix permission, descriptor, rename, link, sync, and cryptographic-randomness semantics correctly. |
 | Git transport, signing, review, and history | Outside `susu`; Git and the operator remain responsible for them. |
 
@@ -297,7 +298,7 @@ After structural validation, AES-GCM authentication must succeed with the reposi
 | `apply` with applicable sensitive entries | One unlock prompt for the invocation | Authenticates and decrypts all applicable sensitive files in memory during preflight, then writes each through a same-directory plaintext staging file to its destination. |
 | `rm` | No prompt | Removes the manifest entry and unlinks its repository source after the manifest transition; it does not decrypt or remove the destination. |
 
-Platform exclusions are evaluated before deciding whether `apply` needs a password. After filtering, every applicable destination is checked against the private state directory, active worktree, and Git common directory. A destination already overlapping a protected root fails before repository-source access or password prompting. Destinations are checked again after source preflight and immediately before replacement. If every sensitive entry is excluded on the running platform, no unlock occurs.
+Platform exclusions are evaluated before deciding whether `apply` needs a password. After filtering, every applicable destination is checked against the private state directory, active worktree, and Git common directory and compared with all other applicable destinations. An existing protected overlap or alias conflict fails before repository-source access or password prompting. The complete set is checked again after unlock, after source/authentication preflight, and immediately before every replacement. If every sensitive entry is excluded on the running platform, no unlock occurs.
 
 ### `show`
 
@@ -310,18 +311,17 @@ Sensitive `show` completes envelope parsing and GCM authentication before sendin
 Before changing any destination, `apply`:
 
 1. filters platform-excluded entries;
-2. resolves every applicable logical destination and rejects canonical or physical overlap with the private state directory, active worktree, or Git common directory;
-3. unlocks once if needed;
+2. resolves every applicable logical destination, rejects canonical or physical overlap with the private state directory, active worktree, or Git common directory, and rejects destination aliases or ancestor conflicts;
+3. unlocks once if needed and immediately repeats the complete destination check;
 4. opens every applicable repository source as a regular file;
 5. checks repository-source size limits;
 6. fully authenticates and decrypts every applicable sensitive envelope;
-7. rejects exact lexical duplicates and ancestor/descendant destination-string conflicts;
-8. rechecks every applicable destination against the protected roots after source preflight; and
-9. checks each destination once more immediately before its staging write.
+7. rechecks every applicable destination against protected roots and every other destination after source preflight; and
+8. repeats the complete check immediately before each staging write.
 
-This prevents a wrong password or corrupted sensitive source from causing a half-applied invocation. Public source content is not cryptographically authenticated.
+This prevents a wrong password, corrupted sensitive source, or detected destination alias from causing an unpreflighted write. Public source content is not cryptographically authenticated. Protected-root checks run before alias comparison at each checkpoint.
 
-Conflict comparison does not account for case-folding or Unicode-normalization aliases. On filesystems where different spellings identify the same object, aliased entries can pass preflight and be replaced sequentially.
+Comparison canonicalizes only each configured HOME/XDG root. It then appends the untouched relative path and processes components separately, preserving path boundaries. Darwin applies canonical Unicode decomposition, locale-independent case folding, and canonical composition and rejects malformed UTF-8; it deliberately treats equivalent spellings as conflicts even on a case-sensitive macOS volume. Linux preserves cleaned spelling. Complete destinations are not canonicalized or dereferenced for alias comparison, so a leaf symlink remains a replaceable directory entry rather than being conflated with its target. Portable logical identities and the exact logical-path AAD authenticated by AES-GCM remain unchanged.
 
 After preflight, destinations are replaced in sorted order. Atomicity is per file, not across the command: a later permission, filesystem, or durability error can occur after earlier destinations were committed. The result reports paths whose final rename occurred.
 
@@ -386,7 +386,13 @@ The descriptor that was checked is the descriptor that is read. Stable parent-di
 
 ### `add` input handling
 
-The concrete HOME path resolved from `~/.kube/cache` and its descendants are ignored before candidate content, repository writes, or password processing. The policy is independent of XDG normalization and uses captured real-directory identity for physical and filesystem case aliases without following a final cache symlink. It covers recursively found and explicitly supplied regular files or real directories; explicit symlink and special-file rules retain precedence. Similar names are not excluded, and legacy manifest entries are not rewritten. An explicitly supplied symlink or non-regular, non-directory object is rejected. While recursively walking a real directory, symlinks and non-regular objects are skipped rather than followed or read. Before walking, `add` rejects an input that is inside the private state directory, active worktree, or Git common directory, names one of those roots, or is an ancestor containing one. Canonical, physical, symlink, and filesystem-resolved case aliases are included, and these direct overlaps fail before a sensitive password prompt. A hard-linked protected state file inside an otherwise unrelated tree is rejected during discovery. After any required password callback, `add` reopens and validates every new candidate against all protected roots before reading any candidate content or writing any repository source. A protected substitution during password entry therefore fails command-wide rather than after an earlier candidate was processed. Before reading each selected file, `susu` reopens it beneath its `HOME` or XDG root with the same no-follow and regular-file checks, repeats repository-root validation, and compares the opened descriptor with protected state-file identities captured under the state lock. A later protected replacement fails before that candidate's content is read or stored. These checks reduce time-of-check/time-of-use exposure between discovery and reading.
+The concrete HOME path resolved from `~/.kube/cache` and its descendants are ignored before candidate content, repository writes, or password processing. The policy is independent of XDG normalization and uses captured real-directory identity for physical and filesystem case aliases without following a final cache symlink. It covers recursively found and explicitly supplied regular files or real directories; explicit symlink and special-file rules retain precedence. Similar names are not excluded, and legacy manifest entries are not rewritten. An explicitly supplied symlink or non-regular, non-directory object is rejected. While recursively walking a real directory, symlinks and non-regular objects are skipped rather than followed or read.
+
+Before walking, `add` rejects an input that is inside the private state directory, active worktree, or Git common directory, names one of those roots, or is an ancestor containing one. Canonical, physical, symlink, and filesystem-resolved case aliases are included, and these direct overlaps fail before a sensitive password prompt. A hard-linked protected state file inside an otherwise unrelated tree is rejected during discovery.
+
+Every ordinary candidate is opened beneath its HOME/XDG root, validated as a regular file, and assigned the identity from that descriptor. A different logical candidate that matches an existing managed regular leaf through `os.SameFile` is treated as already managed without password or repository mutation. Existing managed leaves use `Lstat`, so a leaf symlink does not transfer ownership to its target. Two new candidates with one physical identity fail the complete invocation.
+
+After any required password callback, `add` reopens and validates every new candidate against protected roots, managed regular leaves, and every other candidate before reading content or writing a source. It repeats this command-wide check before each candidate read, reads from the same descriptor that passed validation, and checks the complete set again before committing `susu.json`. This detects either direction of a late hard-link or namespace substitution; a conflict after earlier source writes triggers source rollback. These checks reduce time-of-check/time-of-use exposure, but same-user namespace mutation in the remaining check-to-use intervals remains outside the threat model.
 
 Recursive collection still has no general user-configurable name-based ignore list. The built-in Kubernetes cache exclusion is skipped, the three protected runtime roots are always rejected, and unrelated cache, staging, or control locations are ordinary inputs unless another rule excludes them.
 
@@ -537,5 +543,5 @@ The repository master key is the compromise boundary. If it is disclosed, every 
 11. **Avoid concurrent external repository mutation.** Do not run checkout, merge, cleanup, or scripts that rewrite `susu.json`, `public/`, or `encrypted/` while a `susu` command is active.
 12. **Scope recursive adds narrowly.** An input containing the private state directory, active worktree, or Git common directory is rejected. Still avoid broad ancestors containing unrelated staging files or other unprotected control data; there is no general automatic ignore list.
 13. **Use a trusted Git executable and configuration.** Ensure `git` from `PATH` is the expected binary and review global/system Git configuration. `susu` ignores inherited repository-local and discovery variables for validation, including `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_COMMON_DIR`.
-14. **Account for filesystem aliases.** On case-insensitive or normalization-insensitive filesystems, visually different logical paths can resolve to the same destination and be applied sequentially.
+14. **Resolve reported destination aliases instead of bypassing them.** `apply` rejects case- or canonically equivalent Darwin destinations before source access and repeats the check during the invocation. Remove or exclude the unintended logical entry; do not hand-edit encrypted logical paths because they are authenticated AAD. Darwin comparison is intentionally conservative on case-sensitive volumes, while Linux preserves spelling.
 15. **Do not hand-edit cryptographic metadata.** Unsupported versions, algorithms, lengths, or parameters fail closed, while accepted but inconsistent edits can make the repository permanently undecryptable.
