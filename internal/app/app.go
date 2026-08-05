@@ -1117,7 +1117,12 @@ func readStoredFile(repo *repository.Repository, source string) ([]byte, os.File
 }
 
 type atomicReplaceHooks struct {
-	afterRename func(temporaryName string) error
+	afterRename     func(temporaryName string) error
+	syncFile        func(file *os.File) error
+	closeFile       func(file *os.File) error
+	rename          func(directory *safefs.Directory, oldName, newName string) error
+	syncDirectory   func(directory *safefs.Directory) error
+	removeTemporary func(directory *safefs.Directory, name string) error
 }
 
 // atomicReplaceRooted returns committed=true once the final rename has happened,
@@ -1142,23 +1147,43 @@ func atomicReplaceRootedWithHooks(rootPath, relative string, fileMode, directory
 	if err != nil {
 		return false, err
 	}
+	syncFile := hooks.syncFile
+	if syncFile == nil {
+		syncFile = (*os.File).Sync
+	}
+	closeFile := hooks.closeFile
+	if closeFile == nil {
+		closeFile = (*os.File).Close
+	}
+	rename := hooks.rename
+	if rename == nil {
+		rename = (*safefs.Directory).Rename
+	}
+	syncDirectory := hooks.syncDirectory
+	if syncDirectory == nil {
+		syncDirectory = (*safefs.Directory).Sync
+	}
+	removeTemporaryFile := hooks.removeTemporary
+	if removeTemporaryFile == nil {
+		removeTemporaryFile = (*safefs.Directory).Remove
+	}
 	removeTemporary := true
 	defer func() {
 		_ = file.Close()
 		if removeTemporary {
-			_ = directory.Remove(temporaryName)
+			_ = removeTemporaryFile(directory, temporaryName)
 		}
 	}()
 	if err := write(file); err != nil {
 		return false, err
 	}
-	if err := file.Sync(); err != nil {
+	if err := syncFile(file); err != nil {
 		return false, err
 	}
-	if err := file.Close(); err != nil {
+	if err := closeFile(file); err != nil {
 		return false, err
 	}
-	if err := directory.Rename(temporaryName, leaf); err != nil {
+	if err := rename(directory, temporaryName, leaf); err != nil {
 		return false, err
 	}
 	removeTemporary = false
@@ -1167,7 +1192,7 @@ func atomicReplaceRootedWithHooks(rootPath, relative string, fileMode, directory
 			return true, fmt.Errorf("run post-rename hook: %w", err)
 		}
 	}
-	if err := directory.Sync(); err != nil {
+	if err := syncDirectory(directory); err != nil {
 		return true, fmt.Errorf("destination was replaced but directory sync failed: %w", err)
 	}
 	return true, nil
