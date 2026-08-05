@@ -327,14 +327,21 @@ func helpError(err error) error {
 	return err
 }
 
+type ttyOpener func(string, int, os.FileMode) (*os.File, error)
+type terminalPasswordReader func(int) ([]byte, error)
+
 func readTTYPassword(create bool) ([]byte, error) {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	return readTTYPasswordWith(create, os.OpenFile, term.ReadPassword)
+}
+
+func readTTYPasswordWith(create bool, openTTY ttyOpener, readPassword terminalPasswordReader) ([]byte, error) {
+	tty, err := openTTY("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/tty for password input: %w", err)
 	}
 	defer tty.Close()
 
-	password, err := readOnePassword(tty, "Password: ")
+	password, err := readOnePasswordWith(tty, "Password: ", readPassword)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +352,7 @@ func readTTYPassword(create bool) ([]byte, error) {
 		return password, nil
 	}
 
-	confirmation, err := readOnePassword(tty, "Confirm password: ")
+	confirmation, err := readOnePasswordWith(tty, "Confirm password: ", readPassword)
 	if err != nil {
 		cryptox.ZeroBytes(password)
 		return nil, err
@@ -359,10 +366,17 @@ func readTTYPassword(create bool) ([]byte, error) {
 }
 
 func readOnePassword(tty *os.File, prompt string) ([]byte, error) {
+	return readOnePasswordWith(tty, prompt, term.ReadPassword)
+}
+
+func readOnePasswordWith(tty *os.File, prompt string, readPassword terminalPasswordReader) ([]byte, error) {
 	if _, err := io.WriteString(tty, prompt); err != nil {
 		return nil, err
 	}
-	password, err := term.ReadPassword(int(tty.Fd()))
+	password, err := readPassword(int(tty.Fd()))
+	if err != nil {
+		cryptox.ZeroBytes(password)
+	}
 	_, newlineErr := io.WriteString(tty, "\n")
 	if err != nil {
 		return nil, fmt.Errorf("read password from TTY: %w", err)
