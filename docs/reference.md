@@ -1,6 +1,6 @@
 # susu reference
 
-This document is the detailed user and CLI reference for `susu`. For a short introduction and quick start, see the [README](../README.md).
+This document is the maintained user and CLI contract for `susu`: command semantics, supported platforms, user-visible behavior, limits, errors, and help. It is jointly authoritative with [Design and architecture](design.md) for architecture, serialized formats, and failure semantics, and with the [Encryption and security model](security-model.md) for security requirements and accepted risks. These documents must remain consistent. For a short introduction and quick start, see the [README](../README.md).
 
 `susu` is a small Unix CLI for keeping selected dotfiles in a Git repository and restoring them on another machine. Public files are copied into the repository; files explicitly added with `--sensitive` are encrypted before they enter repository storage.
 
@@ -102,6 +102,20 @@ If applicable sensitive entries exist, `apply` asks once for the repository pass
 | `susu show <path>` | Print a stored file | repository -> stdout |
 | `susu apply` | Restore applicable managed files | repository -> filesystem |
 
+### Errors, exit status, and help
+
+Ordinary user errors return clear, actionable diagnostics and a non-zero process exit status; they do not panic. Diagnostics must distinguish enough context for the user to correct at least these classes of failure:
+
+- an uninitialized, unavailable, or invalid local repository binding;
+- a path that does not exist, is already managed, or is not managed;
+- an unsupported platform value or unsupported runtime platform;
+- Git repository validation failure;
+- an invalid repository password or corrupted encrypted data;
+- invalid or unsupported manifest, crypto-metadata, or encrypted-file formats; and
+- permission and filesystem I/O failures.
+
+Root help and help for all six commands must remain useful and self-contained: `susu --help`, `susu init --help`, `susu add --help`, `susu rm --help`, `susu list --help`, `susu show --help`, and `susu apply --help`. Their examples must be understandable without opening the README.
+
 ### `susu init`
 
 ```bash
@@ -201,7 +215,7 @@ susu add --sensitive "$HOME/.kube/config"
 susu add --sensitive "$HOME/.ssh"
 ```
 
-A sensitive directory is expanded into individually encrypted file entries. Sensitive plaintext is never copied into the repository or a plaintext temporary file. The only repository copy is ciphertext under `encrypted/`.
+A sensitive directory is expanded into individually encrypted file entries. During `add`, sensitive plaintext is never copied into repository storage or a plaintext repository temporary file. The only repository copy is ciphertext under `encrypted/`. Destination staging used later by `apply` is described below.
 
 There is one password and one random 32-byte master key per repository. On the first sensitive operation, `susu` asks for the password and confirmation using a TTY with echo disabled, creates the encryption metadata, and encrypts the input. Later sensitive operations unlock the same master key with one password prompt per invocation. There is no password or key cache.
 
@@ -276,7 +290,7 @@ susu apply
 `apply` restores the repository snapshot to the local filesystem:
 
 - public entries are copied from `public/...`;
-- sensitive entries are authenticated and decrypted directly to their destinations;
+- sensitive entries are authenticated and decrypted in memory, then restored through a mode-`0600` same-directory staging file and atomic rename;
 - entries excluded for the current platform are skipped;
 - applicable destinations overlapping the active private `susu` state directory, active repository worktree, or Git common administrative directory are rejected;
 - destinations that alias or are ancestors of one another under the selected platform's comparison rules are rejected;
