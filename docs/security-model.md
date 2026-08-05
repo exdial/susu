@@ -1,6 +1,6 @@
 # Encryption and security model
 
-This document specifies the encryption and filesystem security model implemented by `susu`. It covers sensitive-file encryption, key and plaintext handling, repository and destination filesystem protections, failure behavior, and operational limits. For the general repository layout, path model, and command architecture, see [Design](design.md).
+This document is the maintained security contract for `susu`. It defines sensitive-file encryption, key and plaintext handling, repository and destination filesystem protections, fail-closed behavior, the threat model, and accepted residual risks. It is jointly authoritative with the [CLI reference](reference.md) for user-facing behavior and [Design and architecture](design.md) for architecture, formats, failure semantics, and verification obligations. These documents must remain consistent.
 
 > `susu` has not undergone an independent security audit. Review the documented threat model and limitations before relying on it for high-value secrets.
 
@@ -23,10 +23,13 @@ For entries marked `sensitive`, the implementation aims to:
 6. avoid persisting the password, password-derived key, or plaintext repository master key;
 7. limit passwords, keys, and decrypted file buffers to the command invocation that needs them, with best-effort in-place zeroization;
 8. confine managed source and destination operations beneath validated filesystem roots without following symlink components;
-9. reject multiple logical entries that identify one physical add candidate or one applicable destination under the selected platform's comparison model; and
-10. use atomic per-file installation or replacement so ordinary write failures do not expose partially written final files.
+9. reject multiple logical entries that identify one physical add candidate or one applicable destination under the selected platform's comparison model;
+10. use atomic per-file installation or replacement so ordinary write failures do not expose partially written final files; and
+11. never log passwords or sensitive plaintext.
 
 Independently of entry sensitivity, the active private `susu` state directory, repository worktree, and Git common administrative directory are protected local control roots. `add` cannot capture exact, descendant, ancestor, canonical, physical, or case aliases of those roots, and opened-file identity checks additionally protect hard-linked local-state files. Applicable `apply` destinations cannot target any protected root or alias one another under the runtime comparison model. These goals concern `susu`'s own behavior. They do not make a compromised host, untrusted Git state, plaintext destination, or weak password safe.
+
+The named plaintext staging file used by sensitive `apply` is an explicitly accepted residual risk in this security model. It preserves portable atomic final-file replacement, hard-link isolation, and leaf-symlink replacement, but abnormal termination or cleanup failure can leave recoverable plaintext beside the destination. Mode `0600`, exact-name ordinary cleanup, and manual residue handling reduce but do not eliminate that risk.
 
 ## Assets and trust boundaries
 
@@ -35,7 +38,7 @@ Independently of entry sensitivity, the active private `susu` state directory, r
 | Repository password | Unlocks the repository master key and enables offline verification of a password guess | No |
 | Password-derived key-encryption key (KEK) | Wraps and unwraps the repository master key | No |
 | 32-byte repository master key | Directly encrypts every sensitive file in that repository; compromise exposes all such files | Only as authenticated ciphertext in `susu.json` |
-| Sensitive plaintext | The data being protected | Yes at the original source and after `apply`; not in sensitive repository storage |
+| Sensitive plaintext | The data being protected | Yes at the original source, applied destination, and transient or residual `apply` staging file; not in sensitive repository storage |
 | Encrypted files and crypto metadata | Non-secret cryptographic material, but essential recovery material and an offline password-guessing target | Yes |
 | Manifest paths and policy | Reveals managed names, directory shape, sensitivity flags, and platform exclusions | Yes, in plaintext |
 | Public entries | Intentionally unencrypted content | Yes, in plaintext |
@@ -328,7 +331,7 @@ After preflight, destinations are replaced in sorted order. Atomicity is per fil
 For a sensitive destination, `apply`:
 
 1. opens or creates the real parent path beneath the logical root without following child symlinks;
-2. creates an exclusive random `.susu-apply-<24 hex characters>.tmp` file in that directory;
+2. creates an exclusive random `.susu-apply-<24 hex characters>.tmp` file in that directory whose staging leaf must differ from the destination leaf;
 3. sets the staging file's Unix mode to `0600`;
 4. writes already-authenticated plaintext;
 5. syncs and closes the file;
@@ -339,7 +342,7 @@ New parent directories requested for sensitive destinations use mode `0700`; exi
 
 A destination leaf symlink is replaced as a directory entry rather than followed. A symlink in any component below the configured root is rejected. The configured `HOME` or XDG root itself may be a symlink; it is resolved once before a stable root descriptor is opened.
 
-The staging file briefly contains plaintext. On ordinary errors before rename, deferred cleanup makes a best-effort attempt to remove only the exact random name created by that replacement. A crash, `SIGKILL`, power loss, or cleanup failure can leave it behind. Later `apply` invocations do not scan the parent or delete staging-like entries by name, so unrelated neighboring entries are preserved; inspect and manually remove a file only after confirming that it is stale residue from an interrupted operation.
+The staging file briefly contains plaintext. On ordinary errors before rename, deferred cleanup makes a best-effort attempt to remove only the exact random name created by that replacement. Ownership of the old staging name ends immediately after a successful rename: deferred cleanup is disabled at that point and must not unlink an entry that another process later creates under the reused name, including when the subsequent directory sync fails. A crash, `SIGKILL`, power loss, or cleanup failure can leave staging residue behind. Later `apply` invocations do not scan the parent or delete staging-like entries by name, so unrelated neighboring entries are preserved; inspect and manually remove a file only after confirming that it is stale residue from an interrupted operation.
 
 ## Password, key, and plaintext lifetime
 
@@ -357,6 +360,7 @@ There is no password cache, daemon, agent, keychain integration, secret-service 
 The implementation explicitly overwrites these owned byte slices when their use ends:
 
 - the password returned to application code;
+- partial password bytes returned together with a TTY read error;
 - the password confirmation buffer;
 - the Argon2id output KEK;
 - the plaintext master key returned by initialization or unlock;
@@ -450,6 +454,16 @@ Security-sensitive failures are closed rather than downgraded:
 | Directory sync failure after final rename | Reported as an error with the destination already replaced and durability uncertain |
 
 Authentication establishes that a wrapped key or sensitive envelope was produced by a holder of the relevant key for the supplied AAD. It does not establish which Git commit should be trusted, whether a manifest entry should exist, whether platform policy is correct, or whether a public source is authentic.
+
+## Security regression obligations
+
+Security-sensitive changes must retain automated coverage for:
+
+- production password input through the controlling TTY rather than stdin, disabled terminal echo, creation confirmation, unlock behavior, prompt/open/read failures, and zeroization of partial bytes returned with a read error;
+- fail-closed rejection of unsupported KDF, wrapping, and file-encryption algorithms, malformed salt/nonce/wrapped-key lengths, and out-of-bounds Argon2id parameters before derivation, together with acceptance of exact supported boundaries;
+- every atomic replacement failure point, including partial writes, file sync, close, rename, exact-name cleanup, and post-rename directory sync, with the correct old-destination and committed-status result;
+- exact ownership of staging cleanup, preservation of unrelated or later-reused names, and sensitive replacement of a leaf symlink or hard-linked destination through a new inode; and
+- protected-root and destination-identity checks before password or source access, after unlock, after source/authentication preflight, and immediately before each relevant read, manifest commit, or destination replacement.
 
 ## Resource limits and denial of service
 
