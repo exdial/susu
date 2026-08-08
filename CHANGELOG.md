@@ -4,8 +4,18 @@ Notable user-facing changes to `susu` are documented in this file. The README de
 
 ## [Unreleased]
 
+### Added
+
+- Added regression coverage for controlling-TTY password input, fail-closed crypto metadata validation, and atomic replacement failure semantics.
+
+### Changed
+
+- Consolidated the maintained behavior contract into the CLI reference, architecture design, and security model, with explicit ownership of user behavior, formats and failure semantics, and security requirements and accepted risks.
+- Formally accepted mode-`0600` same-directory plaintext staging as the portable atomic `apply` contract. Crash or cleanup residue remains a documented risk requiring manual inspection; later invocations do not scavenge neighboring names.
+
 ### Fixed
 
+- Zeroed partial password bytes returned together with a terminal read error.
 - Prevented one physical destination from receiving multiple logical identities: `add` now classifies opened candidates by filesystem identity, while `apply` rejects case- and Unicode-normalization-equivalent Darwin destinations before and during restoration.
 - Excluded the real `~/.kube/cache` directory, its descendants, and physical/case aliases from recursive and explicit regular-file or directory `add` inputs.
 - Prevented inherited Git repository-local and discovery environment variables from redirecting repository-root validation or repository-lock placement.
@@ -46,4 +56,4 @@ Notable user-facing changes to `susu` are documented in this file. The README de
 - Shell glob expansion is delegated to the shell, and symlinks are not managed.
 - Passwords and keys are not cached, and there is no Keychain or Secret Service integration.
 - Input files are limited to 512 MiB. Serialized repository sources and aggregate sensitive `apply` preflight plaintext are limited to 1 GiB.
-- A crash during `apply` can leave a mode-`0600` plaintext staging file until a later `apply` removes it.
+- A crash during `apply` could leave a mode-`0600` plaintext staging file. v0.1.0 attempted broad name-based cleanup on a later `apply`, which could also remove unrelated matching files.

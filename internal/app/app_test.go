@@ -1339,7 +1339,7 @@ func TestApplyRejectsDarwinCaseAndUnicodeDestinationAliases(t *testing.T) {
 
 func TestApplyPrioritizesProtectedRootErrorsOverDestinationAliases(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "darwin", repositoryUnderHome: true})
-	protectedDestination := filepath.Join(environment.repository, "protected")
+	protectedDestination := filepath.Join(environment.repositoryInput, "protected")
 	protected := mustEntryForDestination(t, environment, protectedDestination, true)
 	alias := mustLogicalEntry(t, "~/SRC/REPOSITORY/PROTECTED", false)
 	current := manifest.New()

@@ -503,7 +503,7 @@ Changes to supported behavior are complete only when the relevant automated test
 - paths containing spaces; and
 - repeated operations and idempotency guarantees.
 
-Tests must construct isolated temporary HOME, XDG, repository, and destination roots. They must never read from or modify the developer's real HOME or XDG directories.
+Tests must construct isolated temporary HOME, XDG, repository, and destination roots. They must never read from or modify the developer's real HOME or XDG directories. Fixtures must derive logical destinations from the configured lexical HOME/XDG spellings rather than from post-initialization canonical paths, because supported filesystems can expose aliases such as macOS `/tmp` and `/private/tmp` for the same root.
 
 The following path shapes are a maintained portability regression corpus, not an allowlist. Tests should exercise them according to the ordinary path, shell-expansion, sensitivity, recursion, and platform-exclusion rules; the implementation must not hardcode this list:
 
