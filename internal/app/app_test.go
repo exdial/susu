@@ -1339,7 +1339,7 @@ func TestApplyRejectsDarwinCaseAndUnicodeDestinationAliases(t *testing.T) {
 
 func TestApplyPrioritizesProtectedRootErrorsOverDestinationAliases(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "darwin", repositoryUnderHome: true})
-	protectedDestination := filepath.Join(environment.repository, "protected")
+	protectedDestination := filepath.Join(environment.repositoryInput, "protected")
 	protected := mustEntryForDestination(t, environment, protectedDestination, true)
 	alias := mustLogicalEntry(t, "~/SRC/REPOSITORY/PROTECTED", false)
 	current := manifest.New()
@@ -1464,6 +1464,78 @@ func TestApplyReplacesLeafSymlinkWithoutFollowingItsTarget(t *testing.T) {
 	}
 	assertFileContents(t, destination, storedContents)
 	assertFileContents(t, outside, []byte("outside unchanged\n"))
+}
+
+func TestSensitiveApplyReplacesLeafSymlinkWithoutFollowingItsTarget(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	storedContents := []byte("sensitive managed snapshot\n")
+	destination := mustWriteFile(t, filepath.Join(environment.home, ".sensitive-leaf-symlink"), storedContents, 0o600)
+	if _, err := environment.service.Add([]string{destination}, app.AddOptions{
+		Sensitive: true,
+		Password:  recordingPasswordProvider(testPassword, nil),
+	}); err != nil {
+		t.Fatalf("Add(sensitive) error = %v", err)
+	}
+	outsideContents := []byte("outside target remains unchanged\n")
+	outside := mustWriteFile(t, filepath.Join(environment.root, "sensitive-outside-target"), outsideContents, 0o600)
+	if err := os.Remove(destination); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, destination); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	var passwordCalls []bool
+
+	result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &passwordCalls))
+	if err != nil {
+		t.Fatalf("Apply(sensitive leaf symlink) error = %v", err)
+	}
+	assertStrings(t, result.Applied, []string{"~/.sensitive-leaf-symlink"})
+	assertPasswordCalls(t, passwordCalls, []bool{false})
+	info, err := os.Lstat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		t.Fatalf("sensitive destination mode after Apply() = %v, want regular file", info.Mode())
+	}
+	assertPermissions(t, destination, 0o600)
+	assertFileContents(t, destination, storedContents)
+	assertFileContents(t, outside, outsideContents)
+}
+
+func TestSensitiveApplyBreaksExistingDestinationHardLinks(t *testing.T) {
+	environment := newTestEnvironment(t, testEnvironmentOptions{})
+	storedContents := []byte("sensitive repository snapshot\n")
+	destination := mustWriteFile(t, filepath.Join(environment.home, ".sensitive-hard-link"), storedContents, 0o600)
+	if _, err := environment.service.Add([]string{destination}, app.AddOptions{
+		Sensitive: true,
+		Password:  recordingPasswordProvider(testPassword, nil),
+	}); err != nil {
+		t.Fatalf("Add(sensitive) error = %v", err)
+	}
+	alias := filepath.Join(environment.root, "existing-hard-link-alias")
+	if err := os.Link(destination, alias); err != nil {
+		t.Skipf("hard links are unavailable: %v", err)
+	}
+	localContents := []byte("local inode contents before apply\n")
+	mustWriteFile(t, destination, localContents, 0o600)
+	if !sameExistingFile(destination, alias) {
+		t.Fatal("hard-link fixture paths do not identify the same file")
+	}
+	var passwordCalls []bool
+
+	result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &passwordCalls))
+	if err != nil {
+		t.Fatalf("Apply(sensitive hard link) error = %v", err)
+	}
+	assertStrings(t, result.Applied, []string{"~/.sensitive-hard-link"})
+	assertPasswordCalls(t, passwordCalls, []bool{false})
+	assertFileContents(t, destination, storedContents)
+	assertFileContents(t, alias, localContents)
+	if sameExistingFile(destination, alias) {
+		t.Fatal("Apply() wrote through the existing hard link instead of installing a new inode")
+	}
 }
 
 func TestApplyPreservesUnmanagedStagingLikeFiles(t *testing.T) {

@@ -221,6 +221,202 @@ func TestUnsupportedVersions(t *testing.T) {
 	})
 }
 
+func TestUnlockRejectsUnsupportedMetadataAlgorithms(t *testing.T) {
+	password := []byte("repository password")
+	defer ZeroBytes(password)
+
+	tests := []struct {
+		name   string
+		mutate func(*Metadata)
+	}{
+		{
+			name: "KDF algorithm",
+			mutate: func(metadata *Metadata) {
+				metadata.KDF.Algorithm = "scrypt"
+			},
+		},
+		{
+			name: "key-wrap algorithm",
+			mutate: func(metadata *Metadata) {
+				metadata.Wrap.Algorithm = "chacha20-poly1305"
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			metadata := validShapedCheapMetadata(t)
+			test.mutate(&metadata)
+
+			assertUnlockRejectsMetadata(t, password, metadata, ErrUnsupportedFormat)
+		})
+	}
+}
+
+func TestUnlockRejectsMalformedMetadataLengths(t *testing.T) {
+	password := []byte("repository password")
+	defer ZeroBytes(password)
+
+	tests := []struct {
+		name   string
+		mutate func(*Metadata)
+	}{
+		{
+			name: "15-byte salt",
+			mutate: func(metadata *Metadata) {
+				metadata.KDF.Salt = make([]byte, 15)
+			},
+		},
+		{
+			name: "17-byte salt",
+			mutate: func(metadata *Metadata) {
+				metadata.KDF.Salt = make([]byte, 17)
+			},
+		},
+		{
+			name: "11-byte wrapping nonce",
+			mutate: func(metadata *Metadata) {
+				metadata.Wrap.Nonce = make([]byte, 11)
+			},
+		},
+		{
+			name: "13-byte wrapping nonce",
+			mutate: func(metadata *Metadata) {
+				metadata.Wrap.Nonce = make([]byte, 13)
+			},
+		},
+		{
+			name: "47-byte wrapped key",
+			mutate: func(metadata *Metadata) {
+				metadata.Wrap.Ciphertext = make([]byte, 47)
+			},
+		},
+		{
+			name: "49-byte wrapped key",
+			mutate: func(metadata *Metadata) {
+				metadata.Wrap.Ciphertext = make([]byte, 49)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			metadata := validShapedCheapMetadata(t)
+			test.mutate(&metadata)
+
+			assertUnlockRejectsMetadata(t, password, metadata, ErrInvalidMetadata)
+		})
+	}
+}
+
+func TestUnlockRejectsOutOfBoundsArgon2ParametersBeforeDerivation(t *testing.T) {
+	password := []byte("repository password")
+	defer ZeroBytes(password)
+
+	tests := []struct {
+		name   string
+		mutate func(*Metadata)
+	}{
+		{
+			name: "time 0",
+			mutate: func(metadata *Metadata) {
+				metadata.KDF.Parameters.Time = 0
+			},
+		},
+		{
+			name: "time 11",
+			mutate: func(metadata *Metadata) {
+				metadata.KDF.Parameters.Time = 11
+			},
+		},
+		{
+			name: "parallelism 0",
+			mutate: func(metadata *Metadata) {
+				metadata.KDF.Parameters.Parallelism = 0
+			},
+		},
+		{
+			name: "parallelism 17",
+			mutate: func(metadata *Metadata) {
+				metadata.KDF.Parameters.Parallelism = 17
+			},
+		},
+		{
+			name: "memory 15 below minimum for parallelism 2",
+			mutate: func(metadata *Metadata) {
+				metadata.KDF.Parameters.Parallelism = 2
+				metadata.KDF.Parameters.Memory = 15
+			},
+		},
+		{
+			name: "memory 262145",
+			mutate: func(metadata *Metadata) {
+				metadata.KDF.Parameters.Memory = 262145
+			},
+		},
+		{
+			name: "key length 31",
+			mutate: func(metadata *Metadata) {
+				metadata.KDF.Parameters.KeyLength = 31
+			},
+		},
+		{
+			name: "key length 33",
+			mutate: func(metadata *Metadata) {
+				metadata.KDF.Parameters.KeyLength = 33
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			metadata := validShapedCheapMetadata(t)
+			test.mutate(&metadata)
+
+			// Unlock must reject unsafe work factors before Argon2id can allocate
+			// memory; the 262145 KiB case is a regression guard for that ordering.
+			assertUnlockRejectsMetadata(t, password, metadata, ErrInvalidMetadata)
+		})
+	}
+}
+
+func TestValidateMetadataAcceptsExactArgon2Boundaries(t *testing.T) {
+	tests := []struct {
+		name       string
+		parameters Argon2Parameters
+	}{
+		{
+			name: "minimum",
+			parameters: Argon2Parameters{
+				Time:        1,
+				Memory:      8,
+				Parallelism: 1,
+				KeyLength:   32,
+			},
+		},
+		{
+			name: "maximum",
+			parameters: Argon2Parameters{
+				Time:        10,
+				Memory:      262144,
+				Parallelism: 16,
+				KeyLength:   32,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			metadata := validShapedCheapMetadata(t)
+			metadata.KDF.Parameters = test.parameters
+
+			if err := ValidateMetadata(metadata); err != nil {
+				t.Fatalf("ValidateMetadata() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
 func TestEncryptUsesIndependentNonces(t *testing.T) {
 	masterKey := randomMasterKey(t)
 	defer ZeroBytes(masterKey)
@@ -267,6 +463,46 @@ func TestZeroBytes(t *testing.T) {
 	ZeroBytes(secret)
 	if !bytes.Equal(secret, make([]byte, len(secret))) {
 		t.Fatalf("ZeroBytes() left non-zero data: %v", secret)
+	}
+}
+
+func validShapedCheapMetadata(t *testing.T) Metadata {
+	t.Helper()
+
+	metadata := Metadata{
+		Version: CurrentVersion,
+		KDF: KDFMetadata{
+			Algorithm: AlgorithmArgon2id,
+			Parameters: Argon2Parameters{
+				Time:        1,
+				Memory:      8,
+				Parallelism: 1,
+				KeyLength:   MasterKeySize,
+			},
+			Salt: make([]byte, saltSize),
+		},
+		Wrap: WrapMetadata{
+			Algorithm:  AlgorithmAES256GCM,
+			Nonce:      make([]byte, gcmNonceSize),
+			Ciphertext: make([]byte, MasterKeySize+gcmTagSize),
+		},
+	}
+	if err := ValidateMetadata(metadata); err != nil {
+		t.Fatalf("valid-shaped metadata fixture failed validation: %v", err)
+	}
+	return metadata
+}
+
+func assertUnlockRejectsMetadata(t *testing.T, password []byte, metadata Metadata, wantErr error) {
+	t.Helper()
+
+	key, err := Unlock(password, metadata)
+	if key != nil {
+		ZeroBytes(key)
+		t.Fatal("Unlock() returned a non-nil key for rejected metadata")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Unlock() error = %v, want %v", err, wantErr)
 	}
 }
 

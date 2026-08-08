@@ -2,6 +2,8 @@
 
 `susu` is a one-shot Unix CLI that captures selected files in an existing Git worktree and restores those snapshots into a user's home or XDG config directory. Public entries are stored as ordinary files; entries explicitly marked sensitive are stored as authenticated ciphertext.
 
+This document is the maintained architecture and engineering contract: it defines component boundaries, path and serialized formats, atomicity, failure semantics, and verification obligations. The [CLI reference](reference.md) owns user-facing command behavior, and the [encryption and security model](security-model.md) owns security requirements and accepted risks. The three documents are jointly authoritative in their respective areas and must remain consistent.
+
 The implemented command model has explicit data directions:
 
 | Command | Responsibility | Data direction |
@@ -51,6 +53,13 @@ The Go packages follow the operational boundaries rather than the command names 
 | `internal/repository` | Git-root validation, repository lock placement, storage-directory checks, and confined source access |
 | `internal/safefs` | Descriptor-relative, no-follow open/create/link/rename/remove operations on macOS and Linux |
 | `internal/cryptox` | Repository-key initialization and unlock, encrypted-file envelopes, authentication, and crypto-format validation |
+
+### Engineering constraints
+
+- Core business semantics must remain testable independently of CLI parsing.
+- `cmd/susu` and command handlers must stay thin; orchestration and policy belong in responsibility-based packages rather than `main.go` or flag handlers.
+- Prefer the Go standard library where practical.
+- Add a dependency only when it provides clear value, and keep the production dependency tree reasonably small.
 
 Cryptographic construction, password handling, plaintext boundaries, and the threat model are described in the [encryption and security model](security-model.md). This document covers only the interfaces that affect the wider architecture.
 
@@ -480,3 +489,48 @@ The implemented model has these deliberate or practical limits:
 - New-source no-overwrite installation relies on same-directory hard links.
 - Advisory locking protects only cooperating local `susu` processes; it does not coordinate Git, manual edits, or remote machines.
 - Public content, logical paths, source paths, platform exclusions, and crypto metadata remain visible in the repository. Sensitive-content guarantees and their limits are covered in the [encryption and security model](security-model.md).
+
+## Verification contract
+
+Changes to supported behavior are complete only when the relevant automated tests pass and the CLI builds for both supported platforms, macOS (`darwin`) and Linux. At minimum, verification must cover:
+
+- `init` Git-root validation and machine-local repository binding;
+- HOME normalization, XDG config normalization, and fallback to `~/.config`;
+- public, sensitive, multiple-file, duplicate, and recursive `add` behavior, including built-in exclusions;
+- platform exclusions;
+- `rm`, `list`, public and sensitive `show`, and public and sensitive `apply`;
+- encryption/decryption round trips, wrong passwords, corrupted ciphertext, and invalid or unsupported formats;
+- paths containing spaces; and
+- repeated operations and idempotency guarantees.
+
+Tests must construct isolated temporary HOME, XDG, repository, and destination roots. They must never read from or modify the developer's real HOME or XDG directories. Fixtures must derive logical destinations from the configured lexical HOME/XDG spellings rather than from post-initialization canonical paths, because supported filesystems can expose aliases such as macOS `/tmp` and `/private/tmp` for the same root.
+
+The following path shapes are a maintained portability regression corpus, not an allowlist. Tests should exercise them according to the ordinary path, shell-expansion, sensitivity, recursion, and platform-exclusion rules; the implementation must not hardcode this list:
+
+```text
+~/.aws
+~/.bashrc
+~/.bashrc.*
+~/.bash_profile
+${XDG_CONFIG_HOME}/sops/age/keys.txt
+${XDG_CONFIG_HOME}/starship.toml
+${XDG_CONFIG_HOME}/wezterm/wezterm.lua
+${XDG_CONFIG_HOME}/zed/settings.json
+~/.editorconfig
+~/.gemrc
+~/.gitconfig
+~/.gitignore.global
+~/.gitmessage
+~/.grip/settings.py
+~/.hammerspoon/init.lua
+~/.hushlogin
+~/.inputrc
+~/.kube/
+~/.ssh/
+~/.talos/
+~/.vim/
+~/.vimrc
+~/Library/Application Support/MTMR/items.json
+```
+
+The implementation is done only when all six commands work with their documented multiple-path, recursive, XDG, exclusion, sensitive-data, and restore semantics; sensitive repository storage contains ciphertext rather than plaintext; core behavior has meaningful automated coverage; the reference, design, and security documents match the implementation; root and per-command help are complete; and repository selection requires only the documented local binding created by `init`, with no hidden discovery or selection mechanism.
