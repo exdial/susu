@@ -412,6 +412,22 @@ func (s *Service) Remove(inputs []string) (RemoveResult, error) {
 	return result, nil
 }
 
+// Overview describes the active repository for contextual CLI presentation.
+type Overview struct {
+	Repository   string
+	ManagedFiles int
+}
+
+// Overview returns the active repository root and managed manifest entry count.
+func (s *Service) Overview() (Overview, error) {
+	repo, current, release, err := s.openLocked()
+	if err != nil {
+		return Overview{}, err
+	}
+	defer func() { _ = release() }()
+	return Overview{Repository: repo.Root, ManagedFiles: len(current.Entries)}, nil
+}
+
 // List returns a sorted copy of every managed entry.
 func (s *Service) List() ([]manifest.Entry, error) {
 	_, current, release, err := s.openLocked()

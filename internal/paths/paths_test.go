@@ -7,6 +7,48 @@ import (
 	"testing"
 )
 
+func TestAbbreviateHome(t *testing.T) {
+	temp := t.TempDir()
+	home := filepath.Join(temp, "home with spaces")
+	resolver := mustResolverAt(t, home, "", home)
+
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "home", path: home, want: "~"},
+		{name: "inside home", path: filepath.Join(home, ".dotfiles"), want: "~/.dotfiles"},
+		{name: "outside home", path: filepath.Join(temp, "repositories", "dotfiles"), want: filepath.Join(temp, "repositories", "dotfiles")},
+		{name: "prefix sibling", path: home + "-backup", want: home + "-backup"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := resolver.AbbreviateHome(test.path); got != test.want {
+				t.Fatalf("AbbreviateHome(%q) = %q, want %q", test.path, got, test.want)
+			}
+		})
+	}
+}
+
+func TestAbbreviateHomeRecognizesResolvedAliases(t *testing.T) {
+	temp := t.TempDir()
+	physicalHome := filepath.Join(temp, "physical-home")
+	configuredHome := filepath.Join(temp, "configured-home")
+	repository := filepath.Join(physicalHome, ".dotfiles")
+	if err := os.MkdirAll(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(physicalHome, configuredHome); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	resolver := mustResolverAt(t, configuredHome, "", configuredHome)
+
+	if got := resolver.AbbreviateHome(repository); got != "~/.dotfiles" {
+		t.Fatalf("AbbreviateHome(%q) = %q, want %q", repository, got, "~/.dotfiles")
+	}
+}
+
 func TestNormalizePrefersXDGConfigHomeBeforeHome(t *testing.T) {
 	temp := t.TempDir()
 	home := filepath.Join(temp, "home with spaces")

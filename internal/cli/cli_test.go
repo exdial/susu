@@ -21,27 +21,35 @@ func TestHelp(t *testing.T) {
 		arguments  []string
 		fromStdout bool
 		want       []string
+		notWant    []string
 	}{
 		{
 			name:       "root",
 			arguments:  []string{"--help"},
 			fromStdout: true,
 			want: []string{
+				"susu manages portable public and encrypted dotfiles.",
 				"Usage:\n  susu <command> [arguments]",
-				"Commands:",
+				"Commands:\n  init    initialize susu in an existing Git repository\n  add     start managing files or directories\n  rm      stop managing files\n  ls      list managed files\n  show    print a stored file\n  apply   apply managed files to this machine",
+				"Run `susu <command> --help` for command-specific help.",
+				"Git synchronization stays explicit.",
+				"Use Git normally to commit, pull, and push changes.",
+			},
+			notWant: []string{
 				"init <repository>",
 				"add [options] <path...>",
-				"ls (alias: list)",
-				"apply",
+				"rm <path...>",
+				"show <path>",
+				"alias: list",
 			},
 		},
 		{
 			name:      "init",
 			arguments: []string{"init", "--help"},
 			want: []string{
-				"Usage: susu init <repository>",
-				"Validate an existing Git repository root",
-				"Example:",
+				"Initialize susu in an existing Git repository.",
+				"Usage:\n  susu init <repository>",
+				"Examples:",
 				"susu init ~/src/dotfiles",
 			},
 		},
@@ -49,29 +57,30 @@ func TestHelp(t *testing.T) {
 			name:      "add",
 			arguments: []string{"add", "--help"},
 			want: []string{
-				"Usage: susu add [options] <path...>",
+				"Add files or directories to susu.",
+				"Usage:\n  susu add [options] <path...>",
 				"--sensitive",
 				"--exclude-platform <value>",
-				"machine-local state directory, active repository",
-				"Git common directory are rejected",
 				"Examples:",
+				"susu add ~/.config/nvim",
 			},
 		},
 		{
 			name:      "rm",
 			arguments: []string{"rm", "--help"},
 			want: []string{
-				"Usage: susu rm <path...>",
-				"never removes destination files from HOME",
-				"Example:",
+				"Stop managing files.",
+				"Files are removed from susu management but remain on the filesystem.",
+				"Usage:\n  susu rm <path...>",
+				"Examples:",
 			},
 		},
 		{
 			name:      "ls",
 			arguments: []string{"ls", "--help"},
 			want: []string{
-				"Usage: susu ls",
-				"portable destination paths",
+				"List managed files.",
+				"Usage:\n  susu ls",
 				"annotations",
 				"Alias: susu list",
 			},
@@ -80,7 +89,8 @@ func TestHelp(t *testing.T) {
 			name:      "list alias",
 			arguments: []string{"list", "--help"},
 			want: []string{
-				"Usage: susu ls",
+				"List managed files.",
+				"Usage:\n  susu ls",
 				"Alias: susu list",
 			},
 		},
@@ -88,8 +98,9 @@ func TestHelp(t *testing.T) {
 			name:      "show",
 			arguments: []string{"show", "--help"},
 			want: []string{
-				"Usage: susu show <path>",
-				"Write one stored repository version to stdout",
+				"Print a stored file.",
+				"Usage:\n  susu show <path>",
+				"No destination file is modified.",
 				"Examples:",
 			},
 		},
@@ -97,12 +108,11 @@ func TestHelp(t *testing.T) {
 			name:      "apply",
 			arguments: []string{"apply", "--help"},
 			want: []string{
-				"Usage: susu apply",
-				"Restore repository versions",
-				"current-platform exclusions",
-				"active repository worktree",
-				"before source access or a password",
-				"rechecked before writes",
+				"Apply managed files to this machine.",
+				"Usage:\n  susu apply",
+				"replace their destinations atomically",
+				"Platform exclusions are",
+				"local state and repository destinations are rejected",
 			},
 		},
 	}
@@ -127,6 +137,11 @@ func TestHelp(t *testing.T) {
 					t.Errorf("Run(%q) help does not contain %q:\n%s", test.arguments, want, got)
 				}
 			}
+			for _, notWant := range test.notWant {
+				if strings.Contains(got, notWant) {
+					t.Errorf("Run(%q) help unexpectedly contains %q:\n%s", test.arguments, notWant, got)
+				}
+			}
 			if fixture.passwordCalls != 0 {
 				t.Fatalf("Run(%q) called the password provider %d times", test.arguments, fixture.passwordCalls)
 			}
@@ -147,46 +162,98 @@ func TestEarlyHelpDoesNotRequireHome(t *testing.T) {
 	}
 }
 
-func TestMissingAndUnknownCommands(t *testing.T) {
-	tests := []struct {
-		name       string
-		arguments  []string
-		wantError  string
-		wantStderr string
-	}{
-		{
-			name:       "missing command",
-			wantError:  "command is required",
-			wantStderr: "Usage:\n  susu <command> [arguments]",
-		},
-		{
-			name:      "unknown command",
-			arguments: []string{"frobnicate"},
-			wantError: `unknown command "frobnicate"; run 'susu --help'`,
-		},
+func TestDefaultOverviewBeforeInitialization(t *testing.T) {
+	fixture := newCLIFixture(t)
+	stdout, stderr, err := fixture.run()
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	want := `susu manages portable public and encrypted dotfiles.
+
+Get started:
+  susu init <repository>
+  susu add <path...>
+  susu apply
+
+Run ` + "`susu --help`" + ` to see all commands.
+`
+	if stdout != want {
+		t.Fatalf("Run() stdout = %q, want %q", stdout, want)
+	}
+	if stderr != "" {
+		t.Fatalf("Run() stderr = %q, want empty output", stderr)
+	}
+	if strings.Contains(stdout, "command is required") || strings.Contains(stdout, "Commands:") {
+		t.Fatalf("Run() displayed error or full help instead of onboarding:\n%s", stdout)
+	}
+}
+
+func TestDefaultOverviewForInitializedRepository(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is unavailable")
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := newCLIFixture(t)
-			stdout, stderr, err := fixture.run(test.arguments...)
-			if err == nil {
-				t.Fatalf("Run(%q) succeeded, want error %q", test.arguments, test.wantError)
-			}
-			if err.Error() != test.wantError {
-				t.Fatalf("Run(%q) error = %q, want %q", test.arguments, err, test.wantError)
-			}
-			if stdout != "" {
-				t.Fatalf("Run(%q) stdout = %q, want empty output", test.arguments, stdout)
-			}
-			if test.wantStderr == "" {
-				if stderr != "" {
-					t.Fatalf("Run(%q) stderr = %q, want empty output", test.arguments, stderr)
-				}
-			} else if !strings.Contains(stderr, test.wantStderr) {
-				t.Fatalf("Run(%q) stderr does not contain %q:\n%s", test.arguments, test.wantStderr, stderr)
-			}
-		})
+	fixture := newCLIFixture(t)
+	isolateEnvironment(t, fixture)
+	repositoryPath := filepath.Join(fixture.home, ".dotfiles")
+	command := exec.Command(gitPath, "init", "--quiet", repositoryPath)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	_ = runSuccessfully(t, fixture, "init", repositoryPath)
+
+	if got := runSuccessfully(t, fixture); !strings.Contains(got, "Repository: ~/.dotfiles\nManaged: 0 files") {
+		t.Fatalf("empty initialized overview = %q", got)
+	}
+
+	first := filepath.Join(fixture.home, ".first")
+	second := filepath.Join(fixture.home, ".second")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("managed\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = runSuccessfully(t, fixture, "add", first, second)
+
+	stdout, stderr, err := fixture.run()
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	for _, want := range []string{
+		"susu manages portable public and encrypted dotfiles.",
+		"Repository: ~/.dotfiles",
+		"Managed: 2 files",
+		"Common commands:",
+		"  susu add <path...>",
+		"  susu ls",
+		"  susu apply",
+		"Run `susu --help` to see all commands.",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("Run() overview does not contain %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "Get started:") {
+		t.Errorf("initialized overview contains onboarding:\n%s", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("Run() stderr = %q, want empty output", stderr)
+	}
+}
+
+func TestUnknownCommandRemainsAnError(t *testing.T) {
+	fixture := newCLIFixture(t)
+	stdout, stderr, err := fixture.run("does-not-exist")
+	if err == nil {
+		t.Fatal("Run(unknown command) succeeded, want an error")
+	}
+	wantError := `unknown command "does-not-exist"; run 'susu --help'`
+	if err.Error() != wantError {
+		t.Fatalf("Run(unknown command) error = %q, want %q", err, wantError)
+	}
+	if stdout != "" || stderr != "" {
+		t.Fatalf("Run(unknown command) output = stdout %q, stderr %q; want both empty", stdout, stderr)
 	}
 }
 
@@ -266,7 +333,7 @@ func TestArgumentCardinality(t *testing.T) {
 			if stdout != "" {
 				t.Fatalf("Run(%q) stdout = %q, want empty output", test.arguments, stdout)
 			}
-			wantUsage := "Usage: susu " + test.command
+			wantUsage := "Usage:\n  susu " + test.command
 			if !strings.Contains(stderr, wantUsage) {
 				t.Fatalf("Run(%q) stderr does not contain %q:\n%s", test.arguments, wantUsage, stderr)
 			}
@@ -464,7 +531,7 @@ func newCLIFixture(t *testing.T) *cliFixture {
 		xdgConfigHome: xdgConfigHome,
 		xdgStateHome:  xdgStateHome,
 	}
-	fixture.runner, err = cli.New(service, fixture.stdout, fixture.stderr, func(bool) ([]byte, error) {
+	fixture.runner, err = cli.New(service, resolver, fixture.stdout, fixture.stderr, func(bool) ([]byte, error) {
 		fixture.passwordCalls++
 		return []byte("test-only password"), nil
 	})

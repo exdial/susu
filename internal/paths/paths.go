@@ -82,6 +82,29 @@ func NewResolverFromEnv() (*Resolver, error) {
 	return NewResolver(os.Getenv("HOME"), os.Getenv("XDG_CONFIG_HOME"))
 }
 
+// AbbreviateHome replaces the configured HOME prefix of an absolute path with ~.
+// It recognizes filesystem-resolved aliases such as macOS's /var and /private/var.
+// Paths outside HOME, or paths that cannot be resolved, are returned clean.
+func (r *Resolver) AbbreviateHome(absolute string) string {
+	cleaned := filepath.Clean(absolute)
+	relative, ok := relativeToRoot(r.home, cleaned)
+	if !ok {
+		resolvedHome, homeErr := filepath.EvalSymlinks(r.home)
+		resolvedPath, pathErr := filepath.EvalSymlinks(cleaned)
+		if homeErr != nil || pathErr != nil {
+			return cleaned
+		}
+		relative, ok = relativeToRoot(resolvedHome, resolvedPath)
+		if !ok {
+			return cleaned
+		}
+	}
+	if relative == "" || relative == "." {
+		return HomePrefix
+	}
+	return HomePrefix + "/" + filepath.ToSlash(relative)
+}
+
 // Normalize converts a filesystem path to a portable logical path. Input may
 // be absolute, relative to the resolver's working directory, or begin with ~ or
 // ${XDG_CONFIG_HOME}. XDG_CONFIG_HOME is checked before HOME when roots overlap.

@@ -95,18 +95,22 @@ If applicable sensitive entries exist, `apply` asks once for the repository pass
 
 | Command | Meaning | Data direction |
 | --- | --- | --- |
-| `susu init <repository>` | Initialize and select a dotfiles repository | repository path -> local binding |
-| `susu add [options] <path...>` | Start managing files | filesystem -> repository |
+| `susu init <repository>` | Initialize susu in an existing Git repository | repository path -> local binding |
+| `susu add [options] <path...>` | Start managing files or directories | filesystem -> repository |
 | `susu rm <path...>` | Stop managing files | removes repository entries and copies |
-| `susu ls` | List managed logical paths (`susu list` is an alias) | manifest -> stdout |
+| `susu ls` | List managed files (`susu list` is an alias) | manifest -> stdout |
 | `susu show <path>` | Print a stored file | repository -> stdout |
-| `susu apply` | Restore applicable managed files | repository -> filesystem |
+| `susu apply` | Apply managed files to this machine | repository -> filesystem |
+
+Running `susu` without a command is valid and exits successfully. Before initialization it prints a short onboarding containing `susu init <repository>`, `susu add <path...>`, and `susu apply`. After initialization it validates and opens the active repository through the ordinary state and repository boundary, then prints its HOME-relative root when possible and the exact number of entries in `susu.json`. It does not count repository metadata, storage directories, or Git objects.
+
+`susu --help` prints the complete command overview. Its `Commands:` section contains only the names `init`, `add`, `rm`, `ls`, `show`, and `apply`, with short descriptions and no signatures. Exact syntax remains in command-specific help. The backward-compatible `list` alias is omitted from the root overview and documented by `susu ls --help`.
 
 ### Errors, exit status, and help
 
 Ordinary user errors return clear, actionable diagnostics and a non-zero process exit status; they do not panic. Diagnostics must distinguish enough context for the user to correct at least these classes of failure:
 
-- an uninitialized, unavailable, or invalid local repository binding;
+- an uninitialized repository-dependent command, or an unavailable or invalid local repository binding;
 - a path that does not exist, is already managed, or is not managed;
 - an unsupported platform value or unsupported runtime platform;
 - Git repository validation failure;
@@ -114,7 +118,7 @@ Ordinary user errors return clear, actionable diagnostics and a non-zero process
 - invalid or unsupported manifest, crypto-metadata, or encrypted-file formats; and
 - permission and filesystem I/O failures.
 
-Root help and help for all six commands must remain useful and self-contained: `susu --help`, `susu init --help`, `susu add --help`, `susu rm --help`, `susu ls --help`, `susu show --help`, and `susu apply --help`. The `susu list --help` alias displays the canonical `susu ls` help. Their examples must be understandable without opening the README.
+The valid no-command overview, root help, and help for all six commands must remain useful and self-contained. Root and command help are available through: `susu --help`, `susu init --help`, `susu add --help`, `susu rm --help`, `susu ls --help`, `susu show --help`, and `susu apply --help`. The `susu list --help` alias displays the canonical `susu ls` help. Their examples must be understandable without opening the README.
 
 ### `susu init`
 

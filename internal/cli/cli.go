@@ -22,21 +22,25 @@ import (
 // CLI is one command runner with explicit output and password dependencies.
 type CLI struct {
 	service  *app.Service
+	paths    *paths.Resolver
 	stdout   io.Writer
 	stderr   io.Writer
 	password app.PasswordProvider
 }
 
-// New constructs a command runner. A nil password provider is valid for
-// commands that never touch sensitive entries.
-func New(service *app.Service, stdout, stderr io.Writer, password app.PasswordProvider) (*CLI, error) {
+// New constructs a command runner with domain and path-presentation dependencies.
+// A nil password provider is valid for commands that never touch sensitive entries.
+func New(service *app.Service, resolver *paths.Resolver, stdout, stderr io.Writer, password app.PasswordProvider) (*CLI, error) {
 	if service == nil {
 		return nil, errors.New("app service is nil")
+	}
+	if resolver == nil {
+		return nil, errors.New("path resolver is nil")
 	}
 	if stdout == nil || stderr == nil {
 		return nil, errors.New("CLI output writer is nil")
 	}
-	return &CLI{service: service, stdout: stdout, stderr: stderr, password: password}, nil
+	return &CLI{service: service, paths: resolver, stdout: stdout, stderr: stderr, password: password}, nil
 }
 
 // NewFromEnv builds the production command runner from HOME/XDG state and the
@@ -54,7 +58,7 @@ func NewFromEnv(stdout, stderr io.Writer) (*CLI, error) {
 	if err != nil {
 		return nil, err
 	}
-	return New(service, stdout, stderr, readTTYPassword)
+	return New(service, resolver, stdout, stderr, readTTYPassword)
 }
 
 // PrintHelpIfRequested writes help without constructing environment-dependent
@@ -90,8 +94,7 @@ func (c *CLI) Run(arguments []string) error {
 
 func (c *CLI) run(arguments []string) error {
 	if len(arguments) == 0 {
-		c.printRootHelp(c.stderr)
-		return errors.New("command is required")
+		return c.runOverview()
 	}
 	switch arguments[0] {
 	case "help", "-h", "--help":
@@ -114,13 +117,24 @@ func (c *CLI) run(arguments []string) error {
 	}
 }
 
+func (c *CLI) runOverview() error {
+	overview, err := c.service.Overview()
+	if errors.Is(err, state.ErrNotInitialized) {
+		return c.printOnboarding()
+	}
+	if err != nil {
+		return err
+	}
+	return c.printOverview(overview)
+}
+
 func (c *CLI) runInit(arguments []string) error {
-	flags := c.flagSet("init", `Usage: susu init <repository>
+	flags := c.flagSet("init", `Initialize susu in an existing Git repository.
 
-Validate an existing Git repository root, initialize susu.json and storage
-folders if needed, and bind this machine to the repository.
+Usage:
+  susu init <repository>
 
-Example:
+Examples:
   susu init ~/src/dotfiles
 `)
 	if err := flags.Parse(arguments); err != nil {
@@ -139,22 +153,19 @@ Example:
 }
 
 func (c *CLI) runAdd(arguments []string) error {
-	flags := c.flagSet("add", `Usage: susu add [options] <path...>
+	flags := c.flagSet("add", `Add files or directories to susu.
 
-Start managing one or more files. Real directories are traversed recursively
-and stored as individual file entries; symlinks are never followed. Existing
-entries are skipped and never silently synchronized or overwritten. Inputs
-that overlap or contain susu's machine-local state directory, active repository
-worktree, or Git common directory are rejected.
+Usage:
+  susu add [options] <path...>
 
 Options:
   --sensitive                 encrypt new files with the repository master key
   --exclude-platform <value>  skip on apply for darwin or linux; repeatable
 
 Examples:
-  susu add ~/.zshrc ~/.gitconfig
-  susu add --exclude-platform linux ~/.hammerspoon/init.lua
-  susu add --sensitive ~/.kube/config ~/.ssh/config
+  susu add ~/.gitconfig
+  susu add ~/.config/nvim
+  susu add ~/.ssh/config
 `)
 	var sensitive bool
 	var exclusions stringListFlag
@@ -186,12 +197,14 @@ Examples:
 }
 
 func (c *CLI) runRemove(arguments []string) error {
-	flags := c.flagSet("rm", `Usage: susu rm <path...>
+	flags := c.flagSet("rm", `Stop managing files.
 
-Stop managing one or more exact file paths. This removes susu.json entries and
-repository copies, but never removes destination files from HOME.
+Usage:
+  susu rm <path...>
 
-Example:
+Files are removed from susu management but remain on the filesystem.
+
+Examples:
   susu rm ~/.zshrc ~/.gitconfig
 `)
 	if err := flags.Parse(arguments); err != nil {
@@ -211,9 +224,11 @@ Example:
 }
 
 func (c *CLI) runList(arguments []string) error {
-	flags := c.flagSet("ls", `Usage: susu ls
+	flags := c.flagSet("ls", `List managed files.
 
-List portable destination paths currently managed by the active repository.
+Usage:
+  susu ls
+
 Sensitive and platform-excluded entries receive concise annotations.
 
 Alias: susu list
@@ -238,10 +253,13 @@ Alias: susu list
 }
 
 func (c *CLI) runShow(arguments []string) error {
-	flags := c.flagSet("show", `Usage: susu show <path>
+	flags := c.flagSet("show", `Print a stored file.
 
-Write one stored repository version to stdout. Sensitive content is decrypted
-in memory after one no-echo TTY password prompt; no destination is modified.
+Usage:
+  susu show <path>
+
+Sensitive content is decrypted in memory after one no-echo TTY password prompt.
+No destination file is modified.
 
 Examples:
   susu show ~/.gitconfig
@@ -258,14 +276,14 @@ Examples:
 }
 
 func (c *CLI) runApply(arguments []string) error {
-	flags := c.flagSet("apply", `Usage: susu apply
+	flags := c.flagSet("apply", `Apply managed files to this machine.
 
-Restore repository versions to confined local filesystem destinations. Sources
-are preflighted, each file is replaced atomically, current-platform exclusions
-are skipped, and sensitive entries share one password prompt per invocation.
-Destinations overlapping protected local state, the active repository worktree,
-or its Git common directory are rejected before source access or a password
-prompt and rechecked before writes.
+Usage:
+  susu apply
+
+Applicable files replace their destinations atomically. Platform exclusions are
+honored, and sensitive files share one password prompt per invocation. Protected
+local state and repository destinations are rejected before any file is applied.
 `)
 	if err := flags.Parse(arguments); err != nil {
 		return helpError(err)
@@ -295,26 +313,53 @@ func (c *CLI) flagSet(command, usage string) *flag.FlagSet {
 	return flags
 }
 
+func (c *CLI) printOnboarding() error {
+	_, err := io.WriteString(c.stdout, `susu manages portable public and encrypted dotfiles.
+
+Get started:
+  susu init <repository>
+  susu add <path...>
+  susu apply
+
+Run `+"`susu --help`"+` to see all commands.
+`)
+	return err
+}
+
+func (c *CLI) printOverview(overview app.Overview) error {
+	_, err := fmt.Fprintf(c.stdout, `susu manages portable public and encrypted dotfiles.
+
+Repository: %s
+Managed: %d files
+
+Common commands:
+  susu add <path...>
+  susu ls
+  susu apply
+
+Run `+"`susu --help`"+` to see all commands.
+`, c.paths.AbbreviateHome(overview.Repository), overview.ManagedFiles)
+	return err
+}
+
 func (c *CLI) printRootHelp(output io.Writer) {
-	_, _ = io.WriteString(output, `susu manages portable public and encrypted dotfiles in a Git repository.
+	_, _ = io.WriteString(output, `susu manages portable public and encrypted dotfiles.
 
 Usage:
   susu <command> [arguments]
 
 Commands:
-  init <repository>       initialize and bind an existing Git repository root
-  add [options] <path...> start managing files or recursive directories
-  rm <path...>            stop managing exact files; leave destinations intact
-  ls (alias: list)        list managed portable destination paths
-  show <path>             write one stored version to stdout
-  apply                   restore applicable repository versions locally
+  init    initialize susu in an existing Git repository
+  add     start managing files or directories
+  rm      stop managing files
+  ls      list managed files
+  show    print a stored file
+  apply   apply managed files to this machine
 
-Global help:
-  susu --help
-  susu <command> --help
+Run `+"`susu <command> --help`"+` for command-specific help.
 
-Git commit, push, pull, and repository synchronization remain explicit Git
-operations; susu does not run them for you.
+Git synchronization stays explicit.
+Use Git normally to commit, pull, and push changes.
 `)
 }
 
