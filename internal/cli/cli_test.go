@@ -31,6 +31,7 @@ func TestHelp(t *testing.T) {
 				"Commands:",
 				"init <repository>",
 				"add [options] <path...>",
+				"ls (alias: list)",
 				"apply",
 			},
 		},
@@ -66,12 +67,21 @@ func TestHelp(t *testing.T) {
 			},
 		},
 		{
-			name:      "list",
-			arguments: []string{"list", "--help"},
+			name:      "ls",
+			arguments: []string{"ls", "--help"},
 			want: []string{
-				"Usage: susu list",
+				"Usage: susu ls",
 				"portable destination paths",
 				"annotations",
+				"Alias: susu list",
+			},
+		},
+		{
+			name:      "list alias",
+			arguments: []string{"list", "--help"},
+			want: []string{
+				"Usage: susu ls",
+				"Alias: susu list",
 			},
 		},
 		{
@@ -126,7 +136,7 @@ func TestHelp(t *testing.T) {
 
 func TestEarlyHelpDoesNotRequireHome(t *testing.T) {
 	t.Setenv("HOME", "")
-	for _, arguments := range [][]string{{"--help"}, {"add", "--help"}} {
+	for _, arguments := range [][]string{{"--help"}, {"add", "--help"}, {"ls", "--help"}, {"list", "--help"}} {
 		var output bytes.Buffer
 		if !cli.PrintHelpIfRequested(arguments, &output) {
 			t.Fatalf("PrintHelpIfRequested(%q) = false", arguments)
@@ -212,10 +222,16 @@ func TestArgumentCardinality(t *testing.T) {
 			wantError: "rm requires at least one path",
 		},
 		{
-			name:      "list rejects arguments",
-			command:   "list",
+			name:      "ls rejects arguments",
+			command:   "ls",
+			arguments: []string{"ls", "extra"},
+			wantError: "ls does not accept arguments",
+		},
+		{
+			name:      "list alias rejects arguments",
+			command:   "ls",
 			arguments: []string{"list", "extra"},
-			wantError: "list does not accept arguments",
+			wantError: "ls does not accept arguments",
 		},
 		{
 			name:      "show requires a path",
@@ -320,8 +336,11 @@ func TestPublicCLIWorkflow(t *testing.T) {
 	if got := runSuccessfully(t, fixture, "add", destination); got != "added "+logical+"\n" {
 		t.Fatalf("add stdout = %q, want %q", got, "added "+logical+"\n")
 	}
+	if got := runSuccessfully(t, fixture, "ls"); got != logical+"\n" {
+		t.Fatalf("ls stdout = %q, want %q", got, logical+"\n")
+	}
 	if got := runSuccessfully(t, fixture, "list"); got != logical+"\n" {
-		t.Fatalf("list stdout = %q, want %q", got, logical+"\n")
+		t.Fatalf("list alias stdout = %q, want %q", got, logical+"\n")
 	}
 	if got := runSuccessfully(t, fixture, "show", logical); got != string(contents) {
 		t.Fatalf("show stdout = %q, want %q", got, contents)
@@ -329,8 +348,8 @@ func TestPublicCLIWorkflow(t *testing.T) {
 	if got := runSuccessfully(t, fixture, "rm", destination); got != "removed "+logical+"\n" {
 		t.Fatalf("rm stdout = %q, want %q", got, "removed "+logical+"\n")
 	}
-	if got := runSuccessfully(t, fixture, "list"); got != "" {
-		t.Fatalf("list after rm stdout = %q, want empty output", got)
+	if got := runSuccessfully(t, fixture, "ls"); got != "" {
+		t.Fatalf("ls after rm stdout = %q, want empty output", got)
 	}
 
 	remaining, err := os.ReadFile(destination)

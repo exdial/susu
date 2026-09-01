@@ -75,7 +75,7 @@ func PrintHelpIfRequested(arguments []string, output io.Writer) bool {
 		return true
 	}
 	switch arguments[0] {
-	case "init", "add", "rm", "list", "show", "apply":
+	case "init", "add", "rm", "ls", "list", "show", "apply":
 		_ = helper.Run(arguments)
 		return true
 	default:
@@ -99,7 +99,7 @@ func (c *CLI) Run(arguments []string) error {
 		return c.runAdd(arguments[1:])
 	case "rm":
 		return c.runRemove(arguments[1:])
-	case "list":
+	case "ls", "list":
 		return c.runList(arguments[1:])
 	case "show":
 		return c.runShow(arguments[1:])
@@ -207,17 +207,19 @@ Example:
 }
 
 func (c *CLI) runList(arguments []string) error {
-	flags := c.flagSet("list", `Usage: susu list
+	flags := c.flagSet("ls", `Usage: susu ls
 
 List portable destination paths currently managed by the active repository.
 Sensitive and platform-excluded entries receive concise annotations.
+
+Alias: susu list
 `)
 	if err := flags.Parse(arguments); err != nil {
 		return helpError(err)
 	}
 	if flags.NArg() != 0 {
 		flags.Usage()
-		return errors.New("list does not accept arguments")
+		return errors.New("ls does not accept arguments")
 	}
 	entries, err := c.service.List()
 	if err != nil {
@@ -299,7 +301,7 @@ Commands:
   init <repository>       initialize and bind an existing Git repository root
   add [options] <path...> start managing files or recursive directories
   rm <path...>            stop managing exact files; leave destinations intact
-  list                    list managed portable destination paths
+  ls (alias: list)        list managed portable destination paths
   show <path>             write one stored version to stdout
   apply                   restore applicable repository versions locally
 

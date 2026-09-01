@@ -57,7 +57,7 @@ susu add "$HOME/.zshrc" "$HOME/.gitconfig"
 susu add --exclude-platform linux "$HOME/.hammerspoon/init.lua"
 susu add --sensitive "$HOME/.kube/config"
 
-susu list
+susu ls
 
 git -C "$HOME/src/dotfiles" add susu.json public encrypted
 git -C "$HOME/src/dotfiles" commit -m "Manage dotfiles with susu"
@@ -70,11 +70,11 @@ On another machine, use Git to retrieve the repository and `susu` to restore its
 ```bash
 git clone <repository-url> "$HOME/src/dotfiles"
 susu init "$HOME/src/dotfiles"
-susu list
+susu ls
 susu apply
 ```
 
-> `susu apply` replaces applicable managed destination files. Review `susu list` and the repository before applying; `susu` does not create backups or resolve conflicts.
+> `susu apply` replaces applicable managed destination files. Review `susu ls` and the repository before applying; `susu` does not create backups or resolve conflicts.
 
 ## Commands
 
@@ -83,7 +83,7 @@ susu apply
 | `susu init <repository>` | Select and initialize an existing Git repository root |
 | `susu add [options] <path...>` | Start managing files or directories |
 | `susu rm <path...>` | Stop managing files without deleting local destinations |
-| `susu list` | List managed portable paths |
+| `susu ls` | List managed portable paths (`susu list` is an alias) |
 | `susu show <path>` | Print one stored file to stdout |
 | `susu apply` | Restore applicable files to local destinations |
 

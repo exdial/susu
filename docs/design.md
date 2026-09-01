@@ -11,7 +11,7 @@ The implemented command model has explicit data directions:
 | `init <repository>` | Initialize and bind an existing Git worktree root | repository path → local binding |
 | `add [options] <path...>` | Start managing files | filesystem → repository |
 | `rm <path...>` | Stop managing exact files | manifest and repository storage deletion |
-| `list` | Inspect managed membership | manifest → stdout |
+| `ls` (`list` alias) | Inspect managed membership | manifest → stdout |
 | `show <path>` | Emit one stored snapshot | repository → stdout |
 | `apply` | Restore applicable snapshots | repository → filesystem |
 
@@ -88,7 +88,7 @@ The local binding is intentionally small and unversioned:
 
 The state decoder accepts only that field, rejects trailing data, requires a clean absolute path, and limits the file to 64 KiB. Writes use a `0700` state directory and a `0600` state file, with same-directory temporary-file replacement and file/directory synchronization.
 
-The private `susu` state directory, active repository worktree, and Git common administrative directory are protected local control roots. `add` rejects an explicit input that is inside any root, names the root itself, or is an ancestor containing it. `apply` rejects every applicable manifest destination that overlaps one after platform filtering. Canonical, symlink, physical, and case aliases exposed by the filesystem are included; the small finite set of local-state files additionally receives opened-descriptor hard-link identity checks. For a linked worktree, the active worktree and shared Git common directory can be disjoint and are protected separately. `list`, `show`, and `rm` remain available for inspecting and removing legacy entries that predate this protection.
+The private `susu` state directory, active repository worktree, and Git common administrative directory are protected local control roots. `add` rejects an explicit input that is inside any root, names the root itself, or is an ancestor containing it. `apply` rejects every applicable manifest destination that overlaps one after platform filtering. Canonical, symlink, physical, and case aliases exposed by the filesystem are included; the small finite set of local-state files additionally receives opened-descriptor hard-link identity checks. For a linked worktree, the active worktree and shared Git common directory can be disjoint and are protected separately. `ls`, `show`, and `rm` remain available for inspecting and removing legacy entries that predate this protection.
 
 ### Binding lifecycle
 
@@ -239,7 +239,7 @@ Each entry describes exactly one file:
 
 The optional top-level `crypto` object contains the metadata needed to unlock sensitive entries. Sensitive entries require that metadata. The reverse is not required: after the last sensitive entry is removed, the crypto metadata remains, so a later sensitive add reuses the established repository master key and password.
 
-Sensitivity and platform policy come only from explicit `add` options; neither file contents nor path names imply either classification. Exclusions affect `apply` only. Excluded entries remain visible to `list` and `show`, removable with `rm`, and stored in the repository. An entry excluding both supported platforms is skipped by `apply` on both.
+Sensitivity and platform policy come only from explicit `add` options; neither file contents nor path names imply either classification. Exclusions affect `apply` only. Excluded entries remain visible to `ls` and `show`, removable with `rm`, and stored in the repository. An entry excluding both supported platforms is skipped by `apply` on both.
 
 ### Independent format versions
 
@@ -268,7 +268,7 @@ A valid manifest also has these properties:
 - each sensitive entry has valid repository crypto metadata; and
 - decoded path and source strings contain no Unicode control characters, U+2028, or U+2029 and satisfy the canonical path rules.
 
-CLI-created exclusions are deduplicated and sorted. Entries are sorted by logical path whenever the manifest is saved and whenever `list` or `apply` consumes an ordered view.
+CLI-created exclusions are deduplicated and sorted. Entries are sorted by logical path whenever the manifest is saved and whenever `ls` or `apply` consumes an ordered view.
 
 Manifest validity is structural. Loading the manifest does not prove that every referenced source exists or is readable; commands that need sources preflight them under the repository lock.
 
@@ -346,9 +346,9 @@ The no-overwrite source install uses a random same-directory temporary file, fil
 
 The manifest is committed without the entries before source cleanup begins. Each corresponding repository source is then unlinked and its parent directory synchronized. Local HOME/XDG destinations are never opened or removed. Repository crypto metadata and empty source directories remain.
 
-### `list`: inspect manifest metadata
+### `ls`: inspect manifest metadata
 
-`list` returns entries sorted by logical path and formats sensitivity and exclusions as annotations. It does not open source files, unlock the repository, inspect destinations, or expose low-level crypto metadata.
+`ls` (and its `list` alias) returns entries sorted by logical path and formats sensitivity and exclusions as annotations. It does not open source files, unlock the repository, inspect destinations, or expose low-level crypto metadata.
 
 ### `show`: emit one stored snapshot
 
@@ -498,7 +498,7 @@ Changes to supported behavior are complete only when the relevant automated test
 - HOME normalization, XDG config normalization, and fallback to `~/.config`;
 - public, sensitive, multiple-file, duplicate, and recursive `add` behavior, including built-in exclusions;
 - platform exclusions;
-- `rm`, `list`, public and sensitive `show`, and public and sensitive `apply`;
+- `rm`, `ls` and its `list` alias, public and sensitive `show`, and public and sensitive `apply`;
 - encryption/decryption round trips, wrong passwords, corrupted ciphertext, and invalid or unsupported formats;
 - paths containing spaces; and
 - repeated operations and idempotency guarantees.
