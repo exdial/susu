@@ -79,7 +79,7 @@ func PrintHelpIfRequested(arguments []string, output io.Writer) bool {
 		return true
 	}
 	switch arguments[0] {
-	case "init", "add", "rm", "ls", "list", "show", "apply":
+	case "init", "add", "rm", "ls", "list", "show", "apply", "completion":
 		_ = helper.Run(arguments)
 		return true
 	default:
@@ -112,6 +112,8 @@ func (c *CLI) run(arguments []string) error {
 		return c.runShow(arguments[1:])
 	case "apply":
 		return c.runApply(arguments[1:])
+	case "completion":
+		return c.runCompletion(arguments[1:])
 	default:
 		return fmt.Errorf("unknown command %q; run 'susu --help'", arguments[0])
 	}
@@ -349,12 +351,13 @@ Usage:
   susu <command> [arguments]
 
 Commands:
-  init    initialize susu in an existing Git repository
-  add     start managing files or directories
-  rm      stop managing files
-  ls      list managed files
-  show    print a stored file
-  apply   apply managed files to this machine
+  init        initialize susu in an existing Git repository
+  add         start managing files or directories
+  rm          stop managing files
+  ls          list managed files
+  show        print a stored file
+  apply       apply managed files to this machine
+  completion  generate shell completion script
 
 Run `+"`susu <command> --help`"+` for command-specific help.
 
