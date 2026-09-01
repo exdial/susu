@@ -30,7 +30,7 @@ func TestHelp(t *testing.T) {
 			want: []string{
 				"susu manages portable public and encrypted dotfiles.",
 				"Usage:\n  susu <command> [arguments]",
-				"Commands:\n  init    initialize susu in an existing Git repository\n  add     start managing files or directories\n  rm      stop managing files\n  ls      list managed files\n  show    print a stored file\n  apply   apply managed files to this machine",
+				"Commands:\n  init        initialize susu in an existing Git repository\n  add         start managing files or directories\n  rm          stop managing files\n  ls          list managed files\n  show        print a stored file\n  apply       apply managed files to this machine\n  completion  generate shell completion script",
 				"Run `susu <command> --help` for command-specific help.",
 				"Git synchronization stays explicit.",
 				"Use Git normally to commit, pull, and push changes.",
@@ -115,6 +115,16 @@ func TestHelp(t *testing.T) {
 				"local state and repository destinations are rejected",
 			},
 		},
+		{
+			name:      "completion",
+			arguments: []string{"completion", "--help"},
+			want: []string{
+				"Generate a shell completion script.",
+				"Usage:\n  susu completion <shell>",
+				"bash",
+				"zsh",
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -151,7 +161,7 @@ func TestHelp(t *testing.T) {
 
 func TestEarlyHelpDoesNotRequireHome(t *testing.T) {
 	t.Setenv("HOME", "")
-	for _, arguments := range [][]string{{"--help"}, {"add", "--help"}, {"ls", "--help"}, {"list", "--help"}} {
+	for _, arguments := range [][]string{{"--help"}, {"add", "--help"}, {"ls", "--help"}, {"list", "--help"}, {"completion", "--help"}} {
 		var output bytes.Buffer
 		if !cli.PrintHelpIfRequested(arguments, &output) {
 			t.Fatalf("PrintHelpIfRequested(%q) = false", arguments)
@@ -317,6 +327,18 @@ func TestArgumentCardinality(t *testing.T) {
 			command:   "apply",
 			arguments: []string{"apply", "extra"},
 			wantError: "apply does not accept arguments",
+		},
+		{
+			name:      "completion requires a shell",
+			command:   "completion",
+			arguments: []string{"completion"},
+			wantError: "completion requires exactly one shell",
+		},
+		{
+			name:      "completion rejects multiple shells",
+			command:   "completion",
+			arguments: []string{"completion", "bash", "zsh"},
+			wantError: "completion requires exactly one shell",
 		},
 	}
 

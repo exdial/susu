@@ -9,7 +9,7 @@ This document is the maintained user and CLI contract for `susu`: command semant
 - `susu` manages dotfile entries and their stored contents.
 - Git manages commits, branches, remotes, pushes, pulls, merges, and history.
 
-Available commands are `init`, `add`, `rm`, `ls`, `show`, and `apply`. `list` is an alias for `ls`.
+Available commands are `init`, `add`, `rm`, `ls`, `show`, `apply`, and `completion`. `list` is an alias for `ls`.
 
 ## Supported platforms
 
@@ -101,10 +101,11 @@ If applicable sensitive entries exist, `apply` asks once for the repository pass
 | `susu ls` | List managed files (`susu list` is an alias) | manifest -> stdout |
 | `susu show <path>` | Print a stored file | repository -> stdout |
 | `susu apply` | Apply managed files to this machine | repository -> filesystem |
+| `susu completion <shell>` | Generate a shell completion script | CLI metadata -> stdout |
 
 Running `susu` without a command is valid and exits successfully. Before initialization it prints a short onboarding containing `susu init <repository>`, `susu add <path...>`, and `susu apply`. After initialization it validates and opens the active repository through the ordinary state and repository boundary, then prints its HOME-relative root when possible and the exact number of entries in `susu.json`. It does not count repository metadata, storage directories, or Git objects.
 
-`susu --help` prints the complete command overview. Its `Commands:` section contains only the names `init`, `add`, `rm`, `ls`, `show`, and `apply`, with short descriptions and no signatures. Exact syntax remains in command-specific help. The backward-compatible `list` alias is omitted from the root overview and documented by `susu ls --help`.
+`susu --help` prints the complete command overview. Its `Commands:` section contains only the names `init`, `add`, `rm`, `ls`, `show`, `apply`, and `completion`, with short descriptions and no signatures. Exact syntax remains in command-specific help. The backward-compatible `list` alias is omitted from the root overview and documented by `susu ls --help`.
 
 ### Errors, exit status, and help
 
@@ -118,7 +119,30 @@ Ordinary user errors return clear, actionable diagnostics and a non-zero process
 - invalid or unsupported manifest, crypto-metadata, or encrypted-file formats; and
 - permission and filesystem I/O failures.
 
-The valid no-command overview, root help, and help for all six commands must remain useful and self-contained. Root and command help are available through: `susu --help`, `susu init --help`, `susu add --help`, `susu rm --help`, `susu ls --help`, `susu show --help`, and `susu apply --help`. The `susu list --help` alias displays the canonical `susu ls` help. Their examples must be understandable without opening the README.
+The valid no-command overview, root help, and help for all seven commands must remain useful and self-contained. Root and command help are available through: `susu --help`, `susu init --help`, `susu add --help`, `susu rm --help`, `susu ls --help`, `susu show --help`, `susu apply --help`, and `susu completion --help`. The `susu list --help` alias displays the canonical `susu ls` help. Their examples must be understandable without opening the README.
+
+### `susu completion`
+
+Generate a completion script on standard output without reading the active repository:
+
+```bash
+susu completion bash
+susu completion zsh
+```
+
+Supported shells are `bash` and `zsh`. The scripts complete command names, the backward-compatible `list` alias, command help flags, `add` options, `darwin`/`linux` platform values, completion shell names, and filesystem paths where commands accept paths.
+
+Activate completion for the current shell session:
+
+```bash
+source <(susu completion bash)                 # Bash
+autoload -Uz compinit && compinit               # Zsh initialization
+source <(susu completion zsh)                   # Zsh
+```
+
+For persistent installation, write the generated script to a location loaded by the shell. Common user-local locations are `~/.local/share/bash-completion/completions/susu` for Bash and a directory in Zsh's `fpath` under the filename `_susu` for Zsh. Shell startup and completion initialization remain the user's responsibility.
+
+An omitted, extra, or unsupported shell is an error. Completion generation does not require `susu init`, access local state, inspect managed files, or prompt for a password.
 
 ### `susu init`
 

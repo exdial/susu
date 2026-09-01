@@ -6,6 +6,7 @@ Notable user-facing changes to `susu` are documented in this file. The README de
 
 ### Added
 
+- Added `susu completion <shell>` generation for Bash and Zsh.
 - Added regression coverage for controlling-TTY password input, fail-closed crypto metadata validation, and atomic replacement failure semantics.
 
 ### Changed

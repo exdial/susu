@@ -86,6 +86,15 @@ susu apply
 | `susu ls` | List managed files (`susu list` is an alias) |
 | `susu show <path>` | Print a stored file |
 | `susu apply` | Apply managed files to this machine |
+| `susu completion <shell>` | Generate completions for Bash or Zsh |
+
+Generate and activate shell completions for the current session:
+
+```bash
+source <(susu completion bash)                 # Bash
+autoload -Uz compinit && compinit               # Zsh initialization
+source <(susu completion zsh)                   # Zsh
+```
 
 Running `susu` without a command shows a short onboarding before initialization, or the active repository and managed file count afterward. Use `susu --help` for the complete command overview.
 
