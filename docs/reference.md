@@ -261,7 +261,7 @@ susu ls
 ~/.gitconfig
 ~/.kube/config [sensitive]
 ~/.hammerspoon/init.lua [exclude: linux]
-${XDG_CONFIG_HOME}/starship.toml
+~/.config/starship.toml
 ```
 
 It does not expose cryptographic implementation details.
@@ -307,19 +307,20 @@ Portable atomic replacement on both macOS and Linux requires a short-lived, rand
 
 ## XDG behavior
 
-Portable logical paths are distinct from the filesystem paths used on a particular machine.
+Portable logical paths are distinct from both their user-facing display and the filesystem paths used on a particular machine.
 
-Anything managed under the effective config home is represented with `${XDG_CONFIG_HOME}` in `susu.json`. For example, adding either a file under a configured `XDG_CONFIG_HOME` or the default `~/.config` location produces a logical destination such as:
+The CLI consistently displays anything managed under the effective config home with the familiar `~/.config` prefix, including command results, `ls` output, and errors:
+
+```text
+~/.config/starship.toml
+```
+
+The display is independent of the configured runtime location. At runtime, the path resolves below the configured `XDG_CONFIG_HOME`, or below `$HOME/.config` when `XDG_CONFIG_HOME` is unset.
+
+For portability, the corresponding identity stored in `susu.json` remains:
 
 ```text
 ${XDG_CONFIG_HOME}/starship.toml
-```
-
-At runtime it resolves as follows:
-
-```text
-XDG_CONFIG_HOME is set   -> ${XDG_CONFIG_HOME}/starship.toml
-XDG_CONFIG_HOME is unset -> ~/.config/starship.toml
 ```
 
 The repository storage path remains stable and separate, for example `public/.config/starship.toml`. Machine-specific paths such as `/Users/alex/.zshrc` or `/home/alex/.zshrc` are not stored in the portable manifest.

@@ -151,15 +151,16 @@ The model preserves file bytes and one portable executable-bit distinction. It d
 
 ## Path model
 
-Every managed file has three distinct path forms:
+Every managed file has distinct runtime, user-facing, manifest, and storage path forms:
 
 | Form | Example | Purpose |
 | --- | --- | --- |
 | Concrete filesystem path | `/Users/alex/.config/starship.toml` | Access on the running machine |
+| User-facing display | `~/.config/starship.toml` | Stable CLI output and error text |
 | Logical destination | `${XDG_CONFIG_HOME}/starship.toml` | Portable entry identity in `susu.json` |
 | Repository source | `public/.config/starship.toml` | Deterministic stored representation |
 
-Keeping these forms separate allows the same manifest to resolve under `/Users/alex`, `/home/alex`, a custom XDG config root, or the `~/.config` fallback without editing repository data.
+Keeping these forms separate allows the same manifest to resolve under `/Users/alex`, `/home/alex`, a custom XDG config root, or the `~/.config` fallback without editing repository data. At the CLI boundary, `${XDG_CONFIG_HOME}` in logical paths and errors is rendered as `~/.config`; this display conversion does not alter lookup identities, repository data, or sensitive-file AAD.
 
 ### Normalization and resolution
 
