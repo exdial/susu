@@ -359,6 +359,60 @@ func TestPublicCLIWorkflow(t *testing.T) {
 	if !bytes.Equal(remaining, contents) {
 		t.Fatalf("destination after rm = %q, want %q", remaining, contents)
 	}
+
+	xdgDestination := filepath.Join(fixture.xdgConfigHome, "argocd", "config.yaml")
+	xdgExcludedDestination := filepath.Join(fixture.xdgConfigHome, "argocd", "linux.yaml")
+	for path, contents := range map[string][]byte{
+		xdgDestination:         []byte("current-context: production\n"),
+		xdgExcludedDestination: []byte("platform: linux\n"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := runSuccessfully(t, fixture, "add", xdgDestination); got != "added ~/.config/argocd/config.yaml\n" {
+		t.Fatalf("XDG add stdout = %q", got)
+	}
+	if got := runSuccessfully(t, fixture, "add", xdgDestination); got != "already managed ~/.config/argocd/config.yaml\n" {
+		t.Fatalf("duplicate XDG add stdout = %q", got)
+	}
+	if got := runSuccessfully(t, fixture, "add", "--exclude-platform", "linux", xdgExcludedDestination); got != "added ~/.config/argocd/linux.yaml\n" {
+		t.Fatalf("excluded XDG add stdout = %q", got)
+	}
+	wantList := "~/.config/argocd/config.yaml\n~/.config/argocd/linux.yaml [exclude: linux]\n"
+	if got := runSuccessfully(t, fixture, "ls"); got != wantList {
+		t.Fatalf("XDG ls stdout = %q, want %q", got, wantList)
+	}
+	if got := runSuccessfully(t, fixture, "apply"); got != "applied ~/.config/argocd/config.yaml\nskipped ~/.config/argocd/linux.yaml [excluded on current platform]\n" {
+		t.Fatalf("XDG apply stdout = %q", got)
+	}
+
+	manifestContents, err := os.ReadFile(filepath.Join(boundRepository, "susu.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(manifestContents, []byte(`${XDG_CONFIG_HOME}/argocd/config.yaml`)) {
+		t.Fatalf("susu.json does not retain the XDG logical path:\n%s", manifestContents)
+	}
+
+	if got := runSuccessfully(t, fixture, "rm", xdgDestination, xdgExcludedDestination); got != "removed ~/.config/argocd/config.yaml\nremoved ~/.config/argocd/linux.yaml\n" {
+		t.Fatalf("XDG rm stdout = %q", got)
+	}
+	stdout, stderr, err := fixture.run("rm", xdgDestination)
+	if !errors.Is(err, app.ErrNotManaged) {
+		t.Fatalf("rm missing XDG path error = %v, want app.ErrNotManaged", err)
+	}
+	if stdout != "" || stderr != "" {
+		t.Fatalf("rm missing XDG path output = stdout %q, stderr %q; want both empty", stdout, stderr)
+	}
+	if !strings.Contains(err.Error(), "~/.config/argocd/config.yaml") || strings.Contains(err.Error(), paths.XDGConfigHomePrefix) {
+		t.Fatalf("rm missing XDG path error is not user-facing: %v", err)
+	}
+
 	if fixture.passwordCalls != 0 {
 		t.Fatalf("public workflow called the password provider %d times", fixture.passwordCalls)
 	}

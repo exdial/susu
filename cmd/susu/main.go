@@ -16,7 +16,7 @@ func main() {
 		err = runner.Run(os.Args[1:])
 	}
 	if err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "susu:", err)
+		_, _ = fmt.Fprintln(os.Stderr, "susu:", cli.FormatError(err))
 		os.Exit(1)
 	}
 }

@@ -10,6 +10,7 @@ Notable user-facing changes to `susu` are documented in this file. The README de
 
 ### Changed
 
+- Displayed managed XDG config paths as `~/.config/...` throughout the CLI while retaining `${XDG_CONFIG_HOME}/...` identities in `susu.json`.
 - Renamed the `list` command to `ls`; `list` remains available as an alias.
 - Consolidated the maintained behavior contract into the CLI reference, architecture design, and security model, with explicit ownership of user behavior, formats and failure semantics, and security requirements and accepted risks.
 - Formally accepted mode-`0600` same-directory plaintext staging as the portable atomic `apply` contract. Crash or cleanup residue remains a documented risk requiring manual inspection; later invocations do not scavenge neighboring names.
