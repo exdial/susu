@@ -9,7 +9,7 @@ This document is the maintained user and CLI contract for `susu`: command semant
 - `susu` manages dotfile entries and their stored contents.
 - Git manages commits, branches, remotes, pushes, pulls, merges, and history.
 
-Available commands are `init`, `add`, `rm`, `list`, `show`, and `apply`.
+Available commands are `init`, `add`, `rm`, `ls`, `show`, and `apply`. `list` is an alias for `ls`.
 
 ## Supported platforms
 
@@ -70,7 +70,7 @@ susu add "$HOME/.gitconfig" "$HOME/.vimrc"
 susu add --exclude-platform linux "$HOME/.hammerspoon/init.lua"
 susu add --sensitive "$HOME/.kube/config"
 
-susu list
+susu ls
 
 git -C "$HOME/src/dotfiles" status --short
 git -C "$HOME/src/dotfiles" add susu.json public encrypted
@@ -85,7 +85,7 @@ On another machine, let Git retrieve the repository and let `susu` restore the f
 git clone <repository-url> "$HOME/src/dotfiles"
 
 susu init "$HOME/src/dotfiles"
-susu list
+susu ls
 susu apply
 ```
 
@@ -98,7 +98,7 @@ If applicable sensitive entries exist, `apply` asks once for the repository pass
 | `susu init <repository>` | Initialize and select a dotfiles repository | repository path -> local binding |
 | `susu add [options] <path...>` | Start managing files | filesystem -> repository |
 | `susu rm <path...>` | Stop managing files | removes repository entries and copies |
-| `susu list` | List managed logical paths | manifest -> stdout |
+| `susu ls` | List managed logical paths (`susu list` is an alias) | manifest -> stdout |
 | `susu show <path>` | Print a stored file | repository -> stdout |
 | `susu apply` | Restore applicable managed files | repository -> filesystem |
 
@@ -114,7 +114,7 @@ Ordinary user errors return clear, actionable diagnostics and a non-zero process
 - invalid or unsupported manifest, crypto-metadata, or encrypted-file formats; and
 - permission and filesystem I/O failures.
 
-Root help and help for all six commands must remain useful and self-contained: `susu --help`, `susu init --help`, `susu add --help`, `susu rm --help`, `susu list --help`, `susu show --help`, and `susu apply --help`. Their examples must be understandable without opening the README.
+Root help and help for all six commands must remain useful and self-contained: `susu --help`, `susu init --help`, `susu add --help`, `susu rm --help`, `susu ls --help`, `susu show --help`, and `susu apply --help`. The `susu list --help` alias displays the canonical `susu ls` help. Their examples must be understandable without opening the README.
 
 ### `susu init`
 
@@ -190,7 +190,7 @@ $XDG_STATE_HOME/susu/          # state.json, lock, and state staging files
 
 The state fallback is `~/.local/state/susu/`. In an ordinary repository the Git common directory is normally `<active-repository>/.git` and is already inside the protected worktree. For a linked worktree it can be elsewhere, so `susu` resolves and protects it separately. A sibling outside these exact roots remains manageable unless it is a hard-linked alias of one of the finite protected local-state files.
 
-Repositories created by older versions may already contain entries targeting a now-protected root. `list` and `show` can inspect them, `rm` can remove them, and `apply` refuses an applicable protected destination until it is removed. An entry excluded on the current platform remains skipped.
+Repositories created by older versions may already contain entries targeting a now-protected root. `ls` and `show` can inspect them, `rm` can remove them, and `apply` refuses an applicable protected destination until it is removed. An entry excluded on the current platform remains skipped.
 
 #### Shell expansion
 
@@ -248,13 +248,13 @@ susu rm "$HOME/.gitconfig" "$HOME/.vimrc"
 
 For example, removing `~/.zshrc` deletes `public/.zshrc` but leaves `~/.zshrc` in place. Git remains responsible for recording that repository change and for retaining or removing older versions from Git history.
 
-### `susu list`
+### `susu ls`
 
 ```bash
-susu list
+susu ls
 ```
 
-`list` answers “what files does this repository manage?” using portable logical paths. Output is human-readable and includes relevant entry labels, for example:
+`ls` (also available as `list`) answers “what files does this repository manage?” using portable logical paths. Output is human-readable and includes relevant entry labels, for example:
 
 ```text
 ~/.bashrc
@@ -303,7 +303,7 @@ For `darwin`, comparison canonicalizes only the configured HOME/XDG root, append
 
 Portable atomic replacement on both macOS and Linux requires a short-lived, randomly named staging file next to the final destination. For sensitive entries it is created as `0600`, written only after authentication, synced, and atomically renamed. Each replacement tracks only the exact staging name it created and makes a best-effort attempt to remove that name on ordinary failures before rename. A crash or power loss can leave a `.susu-apply-<24 hex characters>.tmp` plaintext residue. Later `apply` invocations do not delete it or any other neighboring staging-like file because ownership cannot be established safely; inspect and remove confirmed residue manually. Atomicity is per destination: an I/O failure after earlier renames can leave those earlier files applied, and the CLI reports them before returning the error.
 
-`apply` is a restore operation and can replace managed destination files. `susu` does not provide `status`, `diff`, automatic conflict handling, or backups, so review `susu list` and your repository changes before applying.
+`apply` is a restore operation and can replace managed destination files. `susu` does not provide `status`, `diff`, automatic conflict handling, or backups, so review `susu ls` and your repository changes before applying.
 
 ## XDG behavior
 
@@ -403,7 +403,7 @@ A safe repository workflow keeps encryption and Git as separate, visible steps:
 ```bash
 susu add --sensitive "$HOME/.kube/config"
 
-susu list
+susu ls
 git -C "$HOME/src/dotfiles" status --short
 git -C "$HOME/src/dotfiles" add susu.json encrypted
 git -C "$HOME/src/dotfiles" commit -m "Manage encrypted kube config"

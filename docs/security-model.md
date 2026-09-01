@@ -294,7 +294,7 @@ After structural validation, AES-GCM authentication must succeed with the reposi
 | `init` | No prompt | Creates or validates repository metadata and local binding; moves no managed content. |
 | public `add` | No prompt | Reads the source into memory and writes plaintext under `public/`. This is intentional. |
 | sensitive `add` | One creation sequence or one unlock prompt | Reads each source into memory, encrypts it, and writes only the JSON envelope under `encrypted/`. The original source remains plaintext. |
-| `list` | No prompt | Reads manifest metadata only; it does not read or decrypt file contents. |
+| `ls` (`list` alias) | No prompt | Reads manifest metadata only; it does not read or decrypt file contents. |
 | public `show` | No prompt | Streams the repository plaintext source to stdout. |
 | sensitive `show` | One unlock prompt | Reads the envelope, authenticates and decrypts it in memory, then writes plaintext to stdout. It does not modify the destination or create a plaintext file. |
 | `apply` with no applicable sensitive entry | No prompt | Streams public sources through same-directory staging files to destinations. |
@@ -417,7 +417,7 @@ Sensitive sources are set to mode `0600`; public sources are normalized to `0644
 
 `susu.json` is written as a mode-`0644` same-directory temporary file, synced, atomically renamed into place, and followed by a repository-directory sync. If the rename succeeds but directory sync fails, the operation reports that the manifest was committed with uncertain durability and does not roll back newly installed sources.
 
-The local binding contains only the canonical repository path. Its directory is set to `0700`, its state and lock files to `0600`, and state replacement uses a synced same-directory temporary plus rename and directory sync. `init` requires the complete state directory to remain canonically and physically disjoint from both the active worktree and Git common directory, including filesystem-resolved case aliases. A symlink used as the state file is rejected on load. All three control roots are excluded from managed inputs and applicable destinations. A legacy manifest entry targeting one fails before unlock or source access when the overlap already exists; `list`, `show`, and `rm` remain available so the entry can be inspected and removed.
+The local binding contains only the canonical repository path. Its directory is set to `0700`, its state and lock files to `0600`, and state replacement uses a synced same-directory temporary plus rename and directory sync. `init` requires the complete state directory to remain canonically and physically disjoint from both the active worktree and Git common directory, including filesystem-resolved case aliases. A symlink used as the state file is rejected on load. All three control roots are excluded from managed inputs and applicable destinations. A legacy manifest entry targeting one fails before unlock or source access when the overlap already exists; `ls`, `show`, and `rm` remain available so the entry can be inspected and removed.
 
 Source and destination content operations have the strongest descriptor-relative no-follow guarantees. Some top-level repository, manifest, and state setup or loading steps necessarily use pathname-based operating-system calls. Protected directory identities are captured and revalidated during `add` and `apply`, but an attacker able to rewrite filesystem namespaces concurrently as the same user remains outside the threat model.
 
