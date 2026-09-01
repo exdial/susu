@@ -82,6 +82,20 @@ func NewResolverFromEnv() (*Resolver, error) {
 	return NewResolver(os.Getenv("HOME"), os.Getenv("XDG_CONFIG_HOME"))
 }
 
+// AbbreviateHome replaces the configured HOME prefix of an absolute path with ~.
+// Paths outside HOME are returned clean and unchanged.
+func (r *Resolver) AbbreviateHome(absolute string) string {
+	cleaned := filepath.Clean(absolute)
+	relative, ok := relativeToRoot(r.home, cleaned)
+	if !ok {
+		return cleaned
+	}
+	if relative == "" || relative == "." {
+		return HomePrefix
+	}
+	return HomePrefix + "/" + filepath.ToSlash(relative)
+}
+
 // Normalize converts a filesystem path to a portable logical path. Input may
 // be absolute, relative to the resolver's working directory, or begin with ~ or
 // ${XDG_CONFIG_HOME}. XDG_CONFIG_HOME is checked before HOME when roots overlap.

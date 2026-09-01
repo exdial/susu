@@ -1109,6 +1109,14 @@ func TestListOrdersAndFormatsPlatformExclusions(t *testing.T) {
 	}
 	assertPasswordCalls(t, passwordCalls, []bool{true})
 
+	overview, err := environment.service.Overview()
+	if err != nil {
+		t.Fatalf("Overview() error = %v", err)
+	}
+	if overview.Repository != environment.repository || overview.ManagedFiles != 3 {
+		t.Fatalf("Overview() = %+v, want repository %q with 3 managed files", overview, environment.repository)
+	}
+
 	entries, err := environment.service.List()
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
