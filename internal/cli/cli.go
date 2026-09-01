@@ -85,6 +85,10 @@ func PrintHelpIfRequested(arguments []string, output io.Writer) bool {
 
 // Run executes one argv slice without terminating the process.
 func (c *CLI) Run(arguments []string) error {
+	return userFacingError(c.run(arguments))
+}
+
+func (c *CLI) run(arguments []string) error {
 	if len(arguments) == 0 {
 		c.printRootHelp(c.stderr)
 		return errors.New("command is required")
@@ -169,12 +173,12 @@ Examples:
 		Password:         c.password,
 	})
 	for _, logical := range result.Added {
-		if _, err := fmt.Fprintf(c.stdout, "added %s\n", logical); err != nil {
+		if _, err := fmt.Fprintf(c.stdout, "added %s\n", userFacingText(logical)); err != nil {
 			return err
 		}
 	}
 	for _, logical := range result.AlreadyManaged {
-		if _, writeErr := fmt.Fprintf(c.stdout, "already managed %s\n", logical); writeErr != nil {
+		if _, writeErr := fmt.Fprintf(c.stdout, "already managed %s\n", userFacingText(logical)); writeErr != nil {
 			return writeErr
 		}
 	}
@@ -199,7 +203,7 @@ Example:
 	}
 	result, err := c.service.Remove(flags.Args())
 	for _, logical := range result.Removed {
-		if _, writeErr := fmt.Fprintf(c.stdout, "removed %s\n", logical); writeErr != nil {
+		if _, writeErr := fmt.Fprintf(c.stdout, "removed %s\n", userFacingText(logical)); writeErr != nil {
 			return writeErr
 		}
 	}
@@ -226,7 +230,7 @@ Alias: susu list
 		return err
 	}
 	for _, entry := range entries {
-		if _, err := fmt.Fprintln(c.stdout, app.FormatEntry(entry)); err != nil {
+		if _, err := fmt.Fprintln(c.stdout, userFacingText(app.FormatEntry(entry))); err != nil {
 			return err
 		}
 	}
@@ -272,12 +276,12 @@ prompt and rechecked before writes.
 	}
 	result, err := c.service.Apply(c.password)
 	for _, logical := range result.Applied {
-		if _, err := fmt.Fprintf(c.stdout, "applied %s\n", logical); err != nil {
+		if _, err := fmt.Fprintf(c.stdout, "applied %s\n", userFacingText(logical)); err != nil {
 			return err
 		}
 	}
 	for _, logical := range result.Skipped {
-		if _, writeErr := fmt.Fprintf(c.stdout, "skipped %s [excluded on current platform]\n", logical); writeErr != nil {
+		if _, writeErr := fmt.Fprintf(c.stdout, "skipped %s [excluded on current platform]\n", userFacingText(logical)); writeErr != nil {
 			return writeErr
 		}
 	}
@@ -327,6 +331,32 @@ func helpError(err error) error {
 		return nil
 	}
 	return err
+}
+
+// FormatError renders an error for the command-line interface.
+func FormatError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return userFacingText(err.Error())
+}
+
+type formattedError struct {
+	err error
+}
+
+func (err formattedError) Error() string { return FormatError(err.err) }
+func (err formattedError) Unwrap() error { return err.err }
+
+func userFacingError(err error) error {
+	if err == nil || !strings.Contains(err.Error(), paths.XDGConfigHomePrefix) {
+		return err
+	}
+	return formattedError{err: err}
+}
+
+func userFacingText(value string) string {
+	return strings.ReplaceAll(value, paths.XDGConfigHomePrefix, "~/.config")
 }
 
 type ttyOpener func(string, int, os.FileMode) (*os.File, error)
