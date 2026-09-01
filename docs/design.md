@@ -14,6 +14,7 @@ The implemented command model has explicit data directions:
 | `ls` (`list` alias) | Inspect managed membership | manifest → stdout |
 | `show <path>` | Emit one stored snapshot | repository → stdout |
 | `apply` | Restore applicable snapshots | repository → filesystem |
+| `completion <shell>` | Emit static shell integration | CLI metadata → stdout |
 
 `add` captures content only when an entry first becomes managed. Repeating it for an existing entry does not refresh the repository snapshot. There is no background service, key cache, repository auto-discovery, or command that reconciles local and stored changes.
 
@@ -311,7 +312,11 @@ flowchart TB
     More -->|No| Done[Return result]
 ```
 
-The diagram shows `apply`; other commands use the same validated binding, state lock, repository lock, and manifest boundary.
+The diagram shows `apply`; repository-dependent commands use the same validated binding, state lock, repository lock, and manifest boundary. `completion` is presentation-only and does not construct a second repository discovery path.
+
+### `completion`: emit shell integration
+
+`completion` selects one static script for Bash or Zsh and writes it to stdout. The scripts encode only public command, alias, option, enum, and path-position metadata. Generation does not load machine state or a manifest, invoke Git, inspect destinations, or request a password. Unsupported shells and invalid argument counts remain ordinary CLI errors.
 
 ### No command: contextual overview
 
@@ -538,4 +543,4 @@ ${XDG_CONFIG_HOME}/zed/settings.json
 ~/Library/Application Support/MTMR/items.json
 ```
 
-The implementation is done only when all six commands work with their documented multiple-path, recursive, XDG, exclusion, sensitive-data, and restore semantics; sensitive repository storage contains ciphertext rather than plaintext; core behavior has meaningful automated coverage; the reference, design, and security documents match the implementation; root and per-command help are complete; and repository selection requires only the documented local binding created by `init`, with no hidden discovery or selection mechanism.
+The implementation is done only when all repository commands work with their documented multiple-path, recursive, XDG, exclusion, sensitive-data, and restore semantics and completion generation works for every supported shell; sensitive repository storage contains ciphertext rather than plaintext; core behavior has meaningful automated coverage; the reference, design, and security documents match the implementation; root and per-command help are complete; and repository selection requires only the documented local binding created by `init`, with no hidden discovery or selection mechanism.
