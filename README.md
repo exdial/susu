@@ -80,12 +80,14 @@ susu apply
 
 | Command | Purpose |
 | --- | --- |
-| `susu init <repository>` | Select and initialize an existing Git repository root |
+| `susu init <repository>` | Initialize susu in an existing Git repository |
 | `susu add [options] <path...>` | Start managing files or directories |
-| `susu rm <path...>` | Stop managing files without deleting local destinations |
-| `susu ls` | List managed portable paths (`susu list` is an alias) |
-| `susu show <path>` | Print one stored file to stdout |
-| `susu apply` | Restore applicable files to local destinations |
+| `susu rm <path...>` | Stop managing files |
+| `susu ls` | List managed files (`susu list` is an alias) |
+| `susu show <path>` | Print a stored file |
+| `susu apply` | Apply managed files to this machine |
+
+Running `susu` without a command shows a short onboarding before initialization, or the active repository and managed file count afterward. Use `susu --help` for the complete command overview.
 
 `add` captures a file only when it first becomes managed; it does not synchronize entries that already exist. Recursive adds and explicit regular-file or real-directory inputs ignore `~/.kube/cache` and everything below it. Sensitive classification and platform exclusions are always explicit. The machine-local `susu` state directory, active repository worktree, and Git common administrative directory are reserved control roots: `add` rejects inputs that overlap or contain them, and `apply` refuses applicable manifest destinations that would overlap them.
 

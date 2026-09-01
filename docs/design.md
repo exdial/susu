@@ -46,9 +46,9 @@ The Go packages follow the operational boundaries rather than the command names 
 | --- | --- |
 | `cmd/susu` | Process entry point, top-level error reporting, and exit status |
 | `internal/cli` | Command and flag parsing, help text, stdout/stderr formatting, and no-echo password input from `/dev/tty` |
-| `internal/app` | Command semantics, platform filtering, operation ordering, rollback decisions, apply preflight, and orchestration of state and repository locks |
+| `internal/app` | Command semantics, contextual repository overview data, platform filtering, operation ordering, rollback decisions, apply preflight, and orchestration of state and repository locks |
 | `internal/state` | Machine-local repository binding, strict state decoding, atomic state replacement, permissions, and the per-state-home advisory lock |
-| `internal/paths` | Lexical conversion between concrete filesystem paths and portable logical destinations, plus comparison-only platform keys for apply safety |
+| `internal/paths` | Lexical conversion between concrete filesystem paths and portable logical destinations, HOME-relative presentation, and comparison-only platform keys for apply safety |
 | `internal/manifest` | Manifest schema, structural validation, deterministic source mapping, ordering, and atomic `susu.json` replacement |
 | `internal/repository` | Git-root validation, repository lock placement, storage-directory checks, and confined source access |
 | `internal/safefs` | Descriptor-relative, no-follow open/create/link/rename/remove operations on macOS and Linux |
@@ -312,6 +312,10 @@ flowchart TB
 ```
 
 The diagram shows `apply`; other commands use the same validated binding, state lock, repository lock, and manifest boundary.
+
+### No command: contextual overview
+
+A no-argument invocation is a valid presentation flow. It calls the app overview boundary rather than reading local state or the manifest directly from the CLI. A missing binding identified by `state.ErrNotInitialized` selects the short onboarding. An existing binding is opened through the ordinary state lock, repository validation and lock, and manifest load; the app returns the canonical repository root and `len(manifest.Entries)`. The CLI abbreviates a root below the configured HOME with `~` and prints the count. Malformed state, an unavailable repository, and invalid manifests remain errors.
 
 ### `init`: establish repository and machine state
 

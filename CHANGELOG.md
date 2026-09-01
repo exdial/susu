@@ -10,6 +10,8 @@ Notable user-facing changes to `susu` are documented in this file. The README de
 
 ### Changed
 
+- Made no-argument invocation a successful contextual overview: uninitialized installations receive short onboarding, while initialized installations show the active repository and managed file count.
+- Simplified root and command-specific help, keeping command signatures out of the root command list and retaining `list` only as a documented alias of `ls`.
 - Displayed managed XDG config paths as `~/.config/...` throughout the CLI while retaining `${XDG_CONFIG_HOME}/...` identities in `susu.json`.
 - Renamed the `list` command to `ls`; `list` remains available as an alias.
 - Consolidated the maintained behavior contract into the CLI reference, architecture design, and security model, with explicit ownership of user behavior, formats and failure semantics, and security requirements and accepted risks.
