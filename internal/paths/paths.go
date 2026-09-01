@@ -83,12 +83,21 @@ func NewResolverFromEnv() (*Resolver, error) {
 }
 
 // AbbreviateHome replaces the configured HOME prefix of an absolute path with ~.
-// Paths outside HOME are returned clean and unchanged.
+// It recognizes filesystem-resolved aliases such as macOS's /var and /private/var.
+// Paths outside HOME, or paths that cannot be resolved, are returned clean.
 func (r *Resolver) AbbreviateHome(absolute string) string {
 	cleaned := filepath.Clean(absolute)
 	relative, ok := relativeToRoot(r.home, cleaned)
 	if !ok {
-		return cleaned
+		resolvedHome, homeErr := filepath.EvalSymlinks(r.home)
+		resolvedPath, pathErr := filepath.EvalSymlinks(cleaned)
+		if homeErr != nil || pathErr != nil {
+			return cleaned
+		}
+		relative, ok = relativeToRoot(resolvedHome, resolvedPath)
+		if !ok {
+			return cleaned
+		}
 	}
 	if relative == "" || relative == "." {
 		return HomePrefix
