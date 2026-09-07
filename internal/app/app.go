@@ -646,7 +646,7 @@ func (s *Service) applyWithHooks(passwordProvider PasswordProvider, hooks applyH
 		fileMode := os.FileMode(0o644)
 		directoryMode := os.FileMode(0o755)
 		if entry.Sensitive {
-			stored, _, err := readStoredFile(repo, entry.Source)
+			stored, err := readStoredFile(repo, entry.Source)
 			if err != nil {
 				return result, err
 			}
@@ -795,7 +795,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *c
 			return nil, fmt.Errorf("open path root for %q: %w", absolute, err)
 		}
 		name := rootedName(relative)
-		if err := rejectSymlinkComponents(root, name, false); err != nil {
+		if err := rejectSymlinkComponents(root, name); err != nil {
 			_ = root.Close()
 			return nil, fmt.Errorf("inspect %q: %w", absolute, err)
 		}
@@ -1116,20 +1116,20 @@ func openStoredFile(repo *repository.Repository, source string) (*os.File, os.Fi
 	return file, mode, nil
 }
 
-func readStoredFile(repo *repository.Repository, source string) ([]byte, os.FileMode, error) {
-	file, mode, err := openStoredFile(repo, source)
+func readStoredFile(repo *repository.Repository, source string) ([]byte, error) {
+	file, _, err := openStoredFile(repo, source)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	defer file.Close()
 	contents, err := io.ReadAll(io.LimitReader(file, maxRepositoryFileSize+1))
 	if err != nil {
-		return nil, 0, fmt.Errorf("read repository source %q: %w", source, err)
+		return nil, fmt.Errorf("read repository source %q: %w", source, err)
 	}
 	if int64(len(contents)) > maxRepositoryFileSize {
-		return nil, 0, fmt.Errorf("repository source %q exceeds %d bytes", source, maxRepositoryFileSize)
+		return nil, fmt.Errorf("repository source %q exceeds %d bytes", source, maxRepositoryFileSize)
 	}
-	return contents, mode, nil
+	return contents, nil
 }
 
 type atomicReplaceHooks struct {
@@ -1214,7 +1214,7 @@ func atomicReplaceRootedWithHooks(rootPath, relative string, fileMode, directory
 	return true, nil
 }
 
-func rejectSymlinkComponents(root *os.Root, relative string, allowMissing bool) error {
+func rejectSymlinkComponents(root *os.Root, relative string) error {
 	clean := filepath.Clean(relative)
 	if clean == "." {
 		return nil
@@ -1223,9 +1223,6 @@ func rejectSymlinkComponents(root *os.Root, relative string, allowMissing bool) 
 	for _, component := range strings.Split(clean, string(filepath.Separator)) {
 		current = filepath.Join(current, component)
 		info, err := root.Lstat(current)
-		if allowMissing && errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
 		if err != nil {
 			return err
 		}

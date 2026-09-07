@@ -176,10 +176,10 @@ func Validate(value Manifest) error {
 			return fmt.Errorf("%w: sensitive entry %q has no repository crypto metadata", ErrInvalidManifest, entry.Path)
 		}
 	}
-	if first, second, conflict := ancestorConflict(logicalPaths); conflict {
+	if first, second, conflict := ancestorConflict(logicalPaths, seenPaths); conflict {
 		return fmt.Errorf("%w: managed file %q conflicts with descendant %q", ErrInvalidManifest, first, second)
 	}
-	if first, second, conflict := ancestorConflict(sourcePaths); conflict {
+	if first, second, conflict := ancestorConflict(sourcePaths, seenSources); conflict {
 		return fmt.Errorf("%w: repository source %q conflicts with descendant %q", ErrInvalidManifest, first, second)
 	}
 	return nil
@@ -286,14 +286,9 @@ func logicalRelative(logical string) (string, error) {
 	return rawRelative, nil
 }
 
-func ancestorConflict(values []string) (string, string, bool) {
-	sorted := append([]string(nil), values...)
-	sort.Strings(sorted)
-	set := make(map[string]struct{}, len(sorted))
-	for _, value := range sorted {
-		set[value] = struct{}{}
-	}
-	for _, value := range sorted {
+func ancestorConflict(values []string, set map[string]struct{}) (string, string, bool) {
+	sort.Strings(values)
+	for _, value := range values {
 		for separator := strings.LastIndex(value, "/"); separator > 0; separator = strings.LastIndex(value[:separator], "/") {
 			ancestor := value[:separator]
 			if _, exists := set[ancestor]; exists {

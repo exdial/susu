@@ -445,10 +445,6 @@ func readTTYPasswordWith(create bool, openTTY ttyOpener, readPassword terminalPa
 	return password, nil
 }
 
-func readOnePassword(tty *os.File, prompt string) ([]byte, error) {
-	return readOnePasswordWith(tty, prompt, term.ReadPassword)
-}
-
 func readOnePasswordWith(tty *os.File, prompt string, readPassword terminalPasswordReader) ([]byte, error) {
 	if _, err := io.WriteString(tty, prompt); err != nil {
 		return nil, err

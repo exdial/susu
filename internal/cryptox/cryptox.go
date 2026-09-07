@@ -57,15 +57,10 @@ func initializeWithParameters(password []byte, parameters Argon2Parameters) (Met
 	}
 
 	masterKey := make([]byte, MasterKeySize)
-	if _, err := rand.Read(masterKey); err != nil {
-		return Metadata{}, nil, fmt.Errorf("cryptox: generate repository master key: %w", err)
-	}
+	rand.Read(masterKey)
 
 	salt := make([]byte, saltSize)
-	if _, err := rand.Read(salt); err != nil {
-		ZeroBytes(masterKey)
-		return Metadata{}, nil, fmt.Errorf("cryptox: generate Argon2id salt: %w", err)
-	}
+	rand.Read(salt)
 
 	kek := deriveKEK(password, salt, parameters)
 	defer ZeroBytes(kek)
@@ -77,10 +72,7 @@ func initializeWithParameters(password []byte, parameters Argon2Parameters) (Met
 	}
 
 	nonce := make([]byte, aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		ZeroBytes(masterKey)
-		return Metadata{}, nil, fmt.Errorf("cryptox: generate master-key nonce: %w", err)
-	}
+	rand.Read(nonce)
 
 	wrappedKey := aead.Seal(nil, nonce, masterKey, []byte(wrapAADV1))
 	metadata := Metadata{
@@ -100,13 +92,6 @@ func initializeWithParameters(password []byte, parameters Argon2Parameters) (Met
 	return metadata, masterKey, nil
 }
 
-// ValidateMetadata checks crypto metadata without deriving a key. It rejects
-// unsupported versions and algorithms, malformed fields, and unsafe KDF work
-// factors before untrusted repository data can reach Argon2id.
-func ValidateMetadata(metadata Metadata) error {
-	return validateMetadata(metadata)
-}
-
 // Unlock derives the repository KEK from password and authenticates and
 // decrypts the wrapped master key in metadata. If authentication fails, the
 // error wraps ErrInvalidPassword; cryptography cannot tell a wrong password
@@ -115,7 +100,7 @@ func Unlock(password []byte, metadata Metadata) ([]byte, error) {
 	if len(password) == 0 {
 		return nil, fmt.Errorf("%w: password must not be empty", ErrInvalidPassword)
 	}
-	if err := validateMetadata(metadata); err != nil {
+	if err := ValidateMetadata(metadata); err != nil {
 		return nil, err
 	}
 
@@ -162,9 +147,7 @@ func Encrypt(masterKey []byte, logicalPath string, plaintext []byte) ([]byte, er
 	}
 
 	nonce := make([]byte, aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("cryptox: generate file nonce: %w", err)
-	}
+	rand.Read(nonce)
 
 	envelope := Envelope{
 		Version:    CurrentVersion,
@@ -262,7 +245,10 @@ func newAES256GCM(key []byte) (cipher.AEAD, error) {
 	return aead, nil
 }
 
-func validateMetadata(metadata Metadata) error {
+// ValidateMetadata checks crypto metadata without deriving a key. It rejects
+// unsupported versions and algorithms, malformed fields, and unsafe KDF work
+// factors before untrusted repository data can reach Argon2id.
+func ValidateMetadata(metadata Metadata) error {
 	if metadata.Version == 0 {
 		return fmt.Errorf("%w: metadata version is missing", ErrInvalidMetadata)
 	}
