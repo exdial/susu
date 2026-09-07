@@ -230,6 +230,98 @@ func TestValidateRejectsFileAndDescendantConflicts(t *testing.T) {
 	}
 }
 
+func TestValidateAncestorConflictOrder(t *testing.T) {
+	metadata := mustCryptoMetadata(t)
+	tests := []struct {
+		name    string
+		entries []Entry
+		want    string
+	}{
+		{
+			name: "punctuation sibling does not hide ancestor",
+			entries: []Entry{
+				{Path: "~/a/b", Source: "public/a/b"},
+				{Path: "~/a-else", Source: "public/a-else"},
+				{Path: "~/a", Source: "public/a"},
+			},
+			want: `managed file "~/a" conflicts with descendant "~/a/b"`,
+		},
+		{
+			name: "first sorted descendant wins",
+			entries: []Entry{
+				{Path: "~/z/b", Source: "public/z/b"},
+				{Path: "~/z", Source: "public/z"},
+				{Path: "~/a/c", Source: "public/a/c"},
+				{Path: "~/a/b", Source: "public/a/b"},
+				{Path: "~/a", Source: "public/a"},
+			},
+			want: `managed file "~/a" conflicts with descendant "~/a/b"`,
+		},
+		{
+			name: "source-only conflicts use sorted source order",
+			entries: []Entry{
+				{Path: "~/z.enc/b", Source: "encrypted/z.enc/b.enc", Sensitive: true},
+				{Path: "~/z", Source: "encrypted/z.enc", Sensitive: true},
+				{Path: "~/a.enc/b", Source: "encrypted/a.enc/b.enc", Sensitive: true},
+				{Path: "~/a", Source: "encrypted/a.enc", Sensitive: true},
+			},
+			want: `repository source "encrypted/a.enc" conflicts with descendant "encrypted/a.enc/b.enc"`,
+		},
+		{
+			name: "logical conflicts precede source-only conflicts",
+			entries: []Entry{
+				{Path: "~/a", Source: "encrypted/a.enc", Sensitive: true},
+				{Path: "~/a.enc/b", Source: "encrypted/a.enc/b.enc", Sensitive: true},
+				{Path: "~/z/b", Source: "public/z/b"},
+				{Path: "~/z", Source: "public/z"},
+			},
+			want: `managed file "~/z" conflicts with descendant "~/z/b"`,
+		},
+		{
+			name: "siblings are not ancestors",
+			entries: []Entry{
+				{Path: "~/a-else", Source: "public/a-else"},
+				{Path: "~/ab", Source: "public/ab"},
+				{Path: "~/a", Source: "public/a"},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, order := range []string{"original", "reversed"} {
+				t.Run(order, func(t *testing.T) {
+					value := New()
+					value.Crypto = metadata
+					value.Entries = append([]Entry(nil), test.entries...)
+					if order == "reversed" {
+						for left, right := 0, len(value.Entries)-1; left < right; left, right = left+1, right-1 {
+							value.Entries[left], value.Entries[right] = value.Entries[right], value.Entries[left]
+						}
+					}
+					before := append([]Entry(nil), value.Entries...)
+					err := Validate(value)
+					if !reflect.DeepEqual(value.Entries, before) {
+						t.Fatalf("Validate() changed caller entry order: got %#v, want %#v", value.Entries, before)
+					}
+					if test.want == "" {
+						if err != nil {
+							t.Fatalf("Validate() error = %v, want nil", err)
+						}
+						return
+					}
+					if !errors.Is(err, ErrInvalidManifest) {
+						t.Fatalf("Validate() error = %v, want ErrInvalidManifest", err)
+					}
+					if want := ErrInvalidManifest.Error() + ": " + test.want; err.Error() != want {
+						t.Fatalf("Validate() error = %q, want %q", err, want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestSourceForRejectsNonportableLogicalPaths(t *testing.T) {
 	invalidUTF8 := string([]byte{'~', '/', 0xff})
 	for _, logical := range []string{"~/.config/tool/config", "~/line\nbreak", invalidUTF8} {
