@@ -161,8 +161,7 @@ Usage:
   susu add [options] <path...>
 
 Options:
-  --sensitive                 encrypt new files with the repository master key
-  --exclude-platform <value>  skip on apply for darwin or linux; repeatable
+  --sensitive  encrypt new files with the repository master key
 
 Examples:
   susu add ~/.gitconfig
@@ -170,9 +169,7 @@ Examples:
   susu add ~/.ssh/config
 `)
 	var sensitive bool
-	var exclusions stringListFlag
 	flags.BoolVar(&sensitive, "sensitive", false, "encrypt new files as sensitive repository entries")
-	flags.Var(&exclusions, "exclude-platform", "platform to exclude during apply: darwin or linux (repeatable)")
 	if err := flags.Parse(arguments); err != nil {
 		return helpError(err)
 	}
@@ -181,9 +178,8 @@ Examples:
 		return errors.New("add requires at least one path")
 	}
 	result, err := c.service.Add(flags.Args(), app.AddOptions{
-		Sensitive:        sensitive,
-		ExcludePlatforms: exclusions,
-		Password:         c.password,
+		Sensitive: sensitive,
+		Password:  c.password,
 	})
 	for _, logical := range result.Added {
 		if _, err := fmt.Fprintf(c.stdout, "added %s\n", userFacingText(logical)); err != nil {
@@ -231,7 +227,7 @@ func (c *CLI) runList(arguments []string) error {
 Usage:
   susu ls
 
-Sensitive and platform-excluded entries receive concise annotations.
+Sensitive entries receive concise annotations.
 
 Alias: susu list
 `)
@@ -283,8 +279,8 @@ func (c *CLI) runApply(arguments []string) error {
 Usage:
   susu apply
 
-Applicable files replace their destinations atomically. Platform exclusions are
-honored, and sensitive files share one password prompt per invocation. Protected
+Managed files replace their destinations atomically.
+Sensitive files share one password prompt per invocation. Protected
 local state and repository destinations are rejected before any file is applied.
 `)
 	if err := flags.Parse(arguments); err != nil {
@@ -298,11 +294,6 @@ local state and repository destinations are rejected before any file is applied.
 	for _, logical := range result.Applied {
 		if _, err := fmt.Fprintf(c.stdout, "applied %s\n", userFacingText(logical)); err != nil {
 			return err
-		}
-	}
-	for _, logical := range result.Skipped {
-		if _, writeErr := fmt.Fprintf(c.stdout, "skipped %s [excluded on current platform]\n", userFacingText(logical)); writeErr != nil {
-			return writeErr
 		}
 	}
 	return err
@@ -364,14 +355,6 @@ Run `+"`susu <command> --help`"+` for command-specific help.
 Git synchronization stays explicit.
 Use Git normally to commit, pull, and push changes.
 `)
-}
-
-type stringListFlag []string
-
-func (values *stringListFlag) String() string { return strings.Join(*values, ",") }
-func (values *stringListFlag) Set(value string) error {
-	*values = append(*values, value)
-	return nil
 }
 
 func helpError(err error) error {

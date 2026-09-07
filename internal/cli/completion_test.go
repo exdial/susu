@@ -15,8 +15,7 @@ func TestCompletionScripts(t *testing.T) {
 			want: []string{
 				"complete -F _susu_completion susu",
 				"init add rm ls list show apply completion help",
-				"--sensitive --exclude-platform --help -h",
-				"darwin linux",
+				"--sensitive --help -h",
 			},
 		},
 		{

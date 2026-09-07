@@ -37,8 +37,8 @@ func TestApplyRechecksAliasesAfterSourcePreflight(t *testing.T) {
 	if !errors.Is(err, ErrDestinationConflict) {
 		t.Fatalf("applyWithHooks() error = %v, want ErrDestinationConflict", err)
 	}
-	if len(result.Applied) != 0 || len(result.Skipped) != 0 {
-		t.Fatalf("applyWithHooks() result = %+v, want no applied or skipped entries", result)
+	if len(result.Applied) != 0 {
+		t.Fatalf("applyWithHooks() result = %+v, want no applied entries", result)
 	}
 	contents, err := os.ReadFile(homeDestination)
 	if err != nil {
@@ -76,7 +76,7 @@ func TestApplyRechecksAliasesBeforeEachReplacement(t *testing.T) {
 	if !errors.Is(err, ErrDestinationConflict) {
 		t.Fatalf("applyWithHooks() error = %v, want ErrDestinationConflict", err)
 	}
-	if len(result.Applied) != 1 || result.Applied[0] != entries[0].Path || len(result.Skipped) != 0 {
+	if len(result.Applied) != 1 || result.Applied[0] != entries[0].Path {
 		t.Fatalf("applyWithHooks() result = %+v, want only %q applied", result, entries[0].Path)
 	}
 	firstContents, err := os.ReadFile(filepath.Join(xdgBackup, "shared"))

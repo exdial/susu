@@ -8,13 +8,9 @@ import (
 
 const bashCompletion = `# bash completion for susu
 _susu_completion() {
-  local cur prev command
+  local cur command
   COMPREPLY=()
   cur="${COMP_WORDS[COMP_CWORD]}"
-  prev=""
-  if (( COMP_CWORD > 0 )); then
-    prev="${COMP_WORDS[COMP_CWORD-1]}"
-  fi
 
   if (( COMP_CWORD == 1 )); then
     COMPREPLY=( $(compgen -W "init add rm ls list show apply completion help" -- "$cur") )
@@ -24,10 +20,8 @@ _susu_completion() {
   command="${COMP_WORDS[1]}"
   case "$command" in
     add)
-      if [[ "$prev" == "--exclude-platform" ]]; then
-        COMPREPLY=( $(compgen -W "darwin linux" -- "$cur") )
-      elif [[ "$cur" == -* ]]; then
-        COMPREPLY=( $(compgen -W "--sensitive --exclude-platform --help -h" -- "$cur") )
+      if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "--sensitive --help -h" -- "$cur") )
       else
         compopt -o filenames
         COMPREPLY=( $(compgen -f -- "$cur") )
@@ -83,7 +77,6 @@ _susu() {
         '-h[show help]' \
         '--help[show help]' \
         '--sensitive[encrypt new files with the repository master key]' \
-        '*--exclude-platform[skip on apply for a platform]:platform:(darwin linux)' \
         '*:path:_files'
       ;;
     ls|list|apply)

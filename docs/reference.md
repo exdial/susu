@@ -18,7 +18,7 @@ Available commands are `init`, `add`, `rm`, `ls`, `show`, `apply`, and `completi
 - `darwin` (macOS)
 - `linux`
 
-Use those exact values with `--exclude-platform`. Other operating systems and platform names are not supported.
+Other operating systems are not supported.
 
 ## Build and install
 
@@ -57,7 +57,7 @@ Ensure the selected binary directory is on `PATH`. Release maintainers should fo
 
 ## Quick start
 
-The repository passed to `susu init` must already be the root of a Git repository. This example creates one, adds public, platform-specific, and sensitive files, and then commits the result with Git:
+The repository passed to `susu init` must already be the root of a Git repository. This example creates one, adds public and sensitive files, and then commits the result with Git:
 
 ```bash
 mkdir -p "$HOME/src"
@@ -67,7 +67,6 @@ susu init "$HOME/src/dotfiles"
 
 susu add "$HOME/.zshrc"
 susu add "$HOME/.gitconfig" "$HOME/.vimrc"
-susu add --exclude-platform linux "$HOME/.hammerspoon/init.lua"
 susu add --sensitive "$HOME/.kube/config"
 
 susu ls
@@ -89,7 +88,7 @@ susu ls
 susu apply
 ```
 
-If applicable sensitive entries exist, `apply` asks once for the repository password. Entries excluded for the current platform are skipped.
+`apply` restores all managed entries and asks once for the repository password if sensitive entries exist.
 
 ## Command overview
 
@@ -113,7 +112,7 @@ Ordinary user errors return clear, actionable diagnostics and a non-zero process
 
 - an uninitialized repository-dependent command, or an unavailable or invalid local repository binding;
 - a path that does not exist, is already managed, or is not managed;
-- an unsupported platform value or unsupported runtime platform;
+- an unsupported runtime platform;
 - Git repository validation failure;
 - an invalid repository password or corrupted encrypted data;
 - invalid or unsupported manifest, crypto-metadata, or encrypted-file formats; and
@@ -130,7 +129,7 @@ susu completion bash
 susu completion zsh
 ```
 
-Supported shells are `bash` and `zsh`. The scripts complete command names, the backward-compatible `list` alias, command help flags, `add` options, `darwin`/`linux` platform values, completion shell names, and filesystem paths where commands accept paths.
+Supported shells are `bash` and `zsh`. The scripts complete command names, the backward-compatible `list` alias, command help flags, `add` options, completion shell names, and filesystem paths where commands accept paths.
 
 Activate completion for the current shell session:
 
@@ -183,7 +182,7 @@ A directory is expanded into one manifest entry per discovered file. The directo
 
 `add` means **start managing**, not synchronize. For each new file it resolves the path, derives a portable logical destination, copies or encrypts its current contents into the repository, and adds an entry to `susu.json`. If an input is already managed, its entry is not duplicated and its stored contents are not silently overwritten. In a mixed invocation, new inputs can still be added while existing entries remain unchanged.
 
-Candidate identity is taken from an opened, validated regular-file descriptor. A different logical path that identifies the same physical regular file as an existing managed destination is reported as already managed; it does not inherit new sensitivity or exclusions, create a source, or request a password. The existing managed leaf is inspected without following a leaf symlink, so a symlink target does not become managed by association. If two new logical candidates in one invocation identify the same file, the entire invocation fails instead of choosing one identity. This detects hard links and any case or normalization aliases that the active filesystem exposes.
+Candidate identity is taken from an opened, validated regular-file descriptor. A different logical path that identifies the same physical regular file as an existing managed destination is reported as already managed; it does not inherit new sensitivity, create a source, or request a password. The existing managed leaf is inspected without following a leaf symlink, so a symlink target does not become managed by association. If two new logical candidates in one invocation identify the same file, the entire invocation fails instead of choosing one identity. This detects hard links and any case or normalization aliases that the active filesystem exposes.
 
 The active private `susu` state directory, active repository worktree, and Git common administrative directory are never valid managed inputs. `add` rejects each protected root, every path inside it, and any ancestor input that contains it. Canonical, symlink, physical, and case aliases exposed by the filesystem are checked; the finite set of protected local-state files is also checked by opened-file identity so hard-linked aliases cannot be captured. Direct and ancestor overlaps are rejected before directory walking or a sensitive password prompt. After any required password callback, `add` reopens and validates every new candidate before reading any candidate content or writing any repository source. It repeats the command-wide identity and boundary check before every candidate read, reads from the same descriptor that passed validation, and checks once more before committing `susu.json`. A password-time or later substitution therefore fails before commit; sources created earlier in the invocation are rolled back. Use a narrower input path outside the protected control roots.
 
@@ -218,7 +217,7 @@ $XDG_STATE_HOME/susu/          # state.json, lock, and state staging files
 
 The state fallback is `~/.local/state/susu/`. In an ordinary repository the Git common directory is normally `<active-repository>/.git` and is already inside the protected worktree. For a linked worktree it can be elsewhere, so `susu` resolves and protects it separately. A sibling outside these exact roots remains manageable unless it is a hard-linked alias of one of the finite protected local-state files.
 
-Repositories created by older versions may already contain entries targeting a now-protected root. `ls` and `show` can inspect them, `rm` can remove them, and `apply` refuses an applicable protected destination until it is removed. An entry excluded on the current platform remains skipped.
+Repositories created by older versions may already contain entries targeting a now-protected root. `ls` and `show` can inspect them, `rm` can remove them, and `apply` refuses a protected destination until it is removed.
 
 #### Shell expansion
 
@@ -249,20 +248,6 @@ There is one password and one random 32-byte master key per repository. On the f
 
 See the [encryption and security model](security-model.md) for the encryption design and threat model.
 
-### Platform exclusions: `--exclude-platform`
-
-Associate exclusions with every file added by an invocation:
-
-```bash
-susu add --exclude-platform linux "$HOME/.hammerspoon/init.lua"
-susu add --exclude-platform linux "$HOME/Library/Application Support/MTMR/items.json"
-susu add --exclude-platform darwin "$HOME/.config/a-linux-only-tool/config"
-```
-
-The flag accepts only `darwin` and `linux` and may be repeated. Exclusions are stored per entry in `susu.json`. `apply` skips an entry when its exclusions include the current `runtime.GOOS` value.
-
-`susu` does not infer exclusions from path names. For example, a path under `~/Library` is not automatically marked macOS-only; add the exclusion explicitly.
-
 ### `susu rm`
 
 Stop managing one or more files:
@@ -288,7 +273,6 @@ susu ls
 ~/.bashrc
 ~/.gitconfig
 ~/.kube/config [sensitive]
-~/.hammerspoon/init.lua [exclude: linux]
 ~/.config/starship.toml
 ```
 
@@ -315,17 +299,16 @@ Treat sensitive stdout carefully. Redirecting or piping `susu show` can disclose
 susu apply
 ```
 
-`apply` restores the repository snapshot to the local filesystem:
+`apply` restores all managed entries from the repository snapshot to the local filesystem:
 
 - public entries are copied from `public/...`;
 - sensitive entries are authenticated and decrypted in memory, then restored through a mode-`0600` same-directory staging file and atomic rename;
-- entries excluded for the current platform are skipped;
-- applicable destinations overlapping the active private `susu` state directory, active repository worktree, or Git common administrative directory are rejected;
+- destinations overlapping the active private `susu` state directory, active repository worktree, or Git common administrative directory are rejected;
 - destinations that alias or are ancestors of one another under the selected platform's comparison rules are rejected;
 - required parent directories are created; and
 - destination creation and replacement use safe semantics rather than exposing partial results.
 
-Platform filtering and the first protected-destination and alias checks happen before repository-source access or a password prompt. Therefore an excluded protected or aliased entry is skipped normally, while an applicable conflict aborts the invocation without changing any destination. If one or more remaining sensitive entries exist, the password is read once and the unlocked master key is reused only in that process. The complete destination set is checked again immediately after unlock, after every source has been preflighted and every ciphertext authenticated in memory, and before each replacement. Protected-root errors take priority over alias errors at every checkpoint.
+The first protected-destination and alias checks happen before repository-source access or a password prompt. A conflict aborts the invocation without changing any destination. If one or more sensitive entries exist, the password is read once and the unlocked master key is reused only in that process. The complete destination set is checked again immediately after unlock, after every source has been preflighted and every ciphertext authenticated in memory, and before each replacement. Protected-root errors take priority over alias errors at every checkpoint.
 
 For `darwin`, comparison canonicalizes only the configured HOME/XDG root, appends the untouched relative destination, then applies canonical Unicode normalization and locale-independent case folding to each path component. This deliberately fails closed even on a case-sensitive macOS volume. For `linux`, component spelling remains distinct. The comparison never resolves the complete destination, so a managed leaf symlink can still be replaced as a directory entry rather than being confused with its target. Logical manifest identities and the logical-path AAD used for sensitive files are not rewritten.
 
@@ -365,7 +348,7 @@ If `XDG_STATE_HOME` is unset, the fallback is:
 ~/.local/state/susu/state.json
 ```
 
-That state file contains the canonical repository path for this machine and must not be committed to the dotfiles repository. `susu init` requires the complete private state directory to remain disjoint from both the selected worktree and its Git common administrative directory. All three roots are rejected by `add` and protected from applicable `apply` destinations. A private sibling `lock` protects binding changes, while `susu.lock` in Git's common administrative directory serializes repository operations across different local state homes. Neither lock is committed.
+That state file contains the canonical repository path for this machine and must not be committed to the dotfiles repository. `susu init` requires the complete private state directory to remain disjoint from both the selected worktree and its Git common administrative directory. All three roots are rejected by `add` and protected from `apply` destinations. A private sibling `lock` protects binding changes, while `susu.lock` in Git's common administrative directory serializes repository operations across different local state homes. Neither lock is committed.
 
 ## Repository layout
 
@@ -411,13 +394,6 @@ Directories are not flattened. Each stored file corresponds to one entry in `sus
       "path": "~/.kube/config",
       "source": "encrypted/.kube/config.enc",
       "sensitive": true
-    },
-    {
-      "path": "~/.hammerspoon/init.lua",
-      "source": "public/.hammerspoon/init.lua",
-      "excludePlatforms": [
-        "linux"
-      ]
     }
   ]
 }
@@ -449,29 +425,6 @@ susu apply
 
 Before committing, use `git status` to confirm that the sensitive file appears only as an `.enc` file and that no plaintext was copied into the repository. `susu` cannot remove plaintext that was previously committed to Git history.
 
-## macOS and Linux in one repository
-
-Shared files need no platform flag:
-
-```bash
-susu add "$HOME/.zshrc" "$HOME/.gitconfig"
-```
-
-Mark macOS-only files so Linux skips them:
-
-```bash
-susu add --exclude-platform linux "$HOME/.hammerspoon/init.lua"
-susu add --exclude-platform linux "$HOME/Library/Application Support/MTMR/items.json"
-```
-
-Mark Linux-only files in the opposite direction:
-
-```bash
-susu add --exclude-platform darwin "$HOME/.config/a-linux-only-tool/config"
-```
-
-Commit the resulting manifest and storage with Git. After cloning and running `susu init`, the same `susu apply` command works on both supported platforms and filters entries using their explicit metadata.
-
 ## Current limitations
 
 - Only `darwin` and `linux` are supported.
@@ -481,11 +434,10 @@ Commit the resulting manifest and storage with Git. After cloning and running `s
 - `add` rejects explicit symlinks, skips all symlinks encountered during directory traversal, and rejects inputs that overlap or contain protected local-state, active-worktree, or Git-common-directory roots; symlinks are not preserved.
 - Shell globs are not implemented by `susu`; expansion is the shell's responsibility.
 - Sensitive classification is explicit. There is no automatic secret detection.
-- Platform exclusions are explicit. Paths do not trigger automatic platform detection.
 - There is one password per repository, no password cache, no daemon or agent, and no macOS Keychain or Linux Secret Service integration.
 - The master-key design makes password rotation inexpensive, but there is no password-rotation command.
 - There is no templating, host-profile system, GUI, TUI, cloud synchronization, remote-repository management, or multi-repository support.
-- Public entries, logical paths, filenames, exclusions, and other manifest metadata are not encrypted.
+- Public entries, logical paths, filenames, and other manifest metadata are not encrypted.
 - Public permissions are normalized to `0644` or `0755`; arbitrary Unix mode bits are not preserved through Git.
 - An input file is limited to 512 MiB, a serialized repository source read by `show` or `apply` is limited to 1 GiB, and aggregate sensitive plaintext retained during `apply` preflight is limited to 1 GiB.
 - `apply` uses a same-directory staging file for atomic replacement; a process crash can leave a sensitive `0600` plaintext staging residue that must be inspected and removed manually. Later `apply` invocations do not scavenge neighboring files by name.

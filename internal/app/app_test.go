@@ -1085,15 +1085,13 @@ func TestAddRejectsLinkedWorktreeGitCommonPaths(t *testing.T) {
 	}
 }
 
-func TestListOrdersAndFormatsPlatformExclusions(t *testing.T) {
+func TestListOrdersAndFormatsEntries(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{})
 	zeta := mustWriteFile(t, filepath.Join(environment.home, ".zeta"), []byte("zeta\n"), 0o644)
 	middle := mustWriteFile(t, filepath.Join(environment.home, ".middle"), []byte("middle\n"), 0o644)
 	alpha := mustWriteFile(t, filepath.Join(environment.home, ".alpha"), []byte("alpha secret\n"), 0o600)
 
-	if _, err := environment.service.Add([]string{zeta}, app.AddOptions{
-		ExcludePlatforms: []string{"linux", "darwin", "linux"},
-	}); err != nil {
+	if _, err := environment.service.Add([]string{zeta}, app.AddOptions{}); err != nil {
 		t.Fatalf("Add(zeta) error = %v", err)
 	}
 	if _, err := environment.service.Add([]string{middle}, app.AddOptions{}); err != nil {
@@ -1101,9 +1099,8 @@ func TestListOrdersAndFormatsPlatformExclusions(t *testing.T) {
 	}
 	var passwordCalls []bool
 	if _, err := environment.service.Add([]string{alpha}, app.AddOptions{
-		Sensitive:        true,
-		ExcludePlatforms: []string{"linux"},
-		Password:         recordingPasswordProvider(testPassword, &passwordCalls),
+		Sensitive: true,
+		Password:  recordingPasswordProvider(testPassword, &passwordCalls),
 	}); err != nil {
 		t.Fatalf("Add(alpha) error = %v", err)
 	}
@@ -1129,11 +1126,10 @@ func TestListOrdersAndFormatsPlatformExclusions(t *testing.T) {
 		lines[index] = app.FormatEntry(entry)
 	}
 	assertStrings(t, lines, []string{
-		"~/.alpha [sensitive] [exclude: linux]",
+		"~/.alpha [sensitive]",
 		"~/.middle",
-		"~/.zeta [exclude: darwin, linux]",
+		"~/.zeta",
 	})
-	assertStrings(t, mustFindEntry(t, mustLoadManifest(t, environment), "~/.zeta").ExcludePlatforms, []string{"darwin", "linux"})
 }
 
 func TestRemoveDeletesRepositoryCopyButLeavesDestination(t *testing.T) {
@@ -1241,51 +1237,54 @@ func TestShowEncryptedAndReportsPasswordOrCiphertextErrors(t *testing.T) {
 }
 
 func TestApplyRestoresPublicAndMultipleSensitiveFilesWithOnePasswordRead(t *testing.T) {
-	environment := newTestEnvironment(t, testEnvironmentOptions{})
-	publicContents := []byte("public profile\n")
-	firstSecret := []byte("first-sensitive-value-18acb3\n")
-	secondSecret := []byte("second-sensitive-value-b77d01\n")
-	publicDestination := mustWriteFile(t, filepath.Join(environment.home, ".profile"), publicContents, 0o640)
-	firstDestination := mustWriteFile(t, filepath.Join(environment.home, ".secrets", "alpha"), firstSecret, 0o600)
-	secondDestination := mustWriteFile(t, filepath.Join(environment.home, ".secrets", "beta"), secondSecret, 0o600)
+	for _, platform := range []string{"darwin", "linux"} {
+		t.Run(platform, func(t *testing.T) {
+			environment := newTestEnvironment(t, testEnvironmentOptions{platform: platform})
+			publicContents := []byte("public profile\n")
+			firstSecret := []byte("first-sensitive-value-18acb3\n")
+			secondSecret := []byte("second-sensitive-value-b77d01\n")
+			publicDestination := mustWriteFile(t, filepath.Join(environment.home, ".profile"), publicContents, 0o640)
+			firstDestination := mustWriteFile(t, filepath.Join(environment.home, ".secrets", "alpha"), firstSecret, 0o600)
+			secondDestination := mustWriteFile(t, filepath.Join(environment.home, ".secrets", "beta"), secondSecret, 0o600)
 
-	if _, err := environment.service.Add([]string{publicDestination}, app.AddOptions{}); err != nil {
-		t.Fatalf("Add(public) error = %v", err)
-	}
-	var addPasswordCalls []bool
-	addResult, err := environment.service.Add([]string{secondDestination, firstDestination}, app.AddOptions{
-		Sensitive: true,
-		Password:  recordingPasswordProvider(testPassword, &addPasswordCalls),
-	})
-	if err != nil {
-		t.Fatalf("Add(sensitive files) error = %v", err)
-	}
-	assertStrings(t, addResult.Added, []string{"~/.secrets/alpha", "~/.secrets/beta"})
-	assertPasswordCalls(t, addPasswordCalls, []bool{true})
+			if _, err := environment.service.Add([]string{publicDestination}, app.AddOptions{}); err != nil {
+				t.Fatalf("Add(public) error = %v", err)
+			}
+			var addPasswordCalls []bool
+			addResult, err := environment.service.Add([]string{secondDestination, firstDestination}, app.AddOptions{
+				Sensitive: true,
+				Password:  recordingPasswordProvider(testPassword, &addPasswordCalls),
+			})
+			if err != nil {
+				t.Fatalf("Add(sensitive files) error = %v", err)
+			}
+			assertStrings(t, addResult.Added, []string{"~/.secrets/alpha", "~/.secrets/beta"})
+			assertPasswordCalls(t, addPasswordCalls, []bool{true})
 
-	if err := os.Remove(publicDestination); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(filepath.Join(environment.home, ".secrets")); err != nil {
-		t.Fatal(err)
-	}
+			if err := os.Remove(publicDestination); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.RemoveAll(filepath.Join(environment.home, ".secrets")); err != nil {
+				t.Fatal(err)
+			}
 
-	var applyPasswordCalls []bool
-	result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &applyPasswordCalls))
-	if err != nil {
-		t.Fatalf("Apply() error = %v", err)
+			var applyPasswordCalls []bool
+			result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &applyPasswordCalls))
+			if err != nil {
+				t.Fatalf("Apply() error = %v", err)
+			}
+			assertStrings(t, result.Applied, []string{"~/.profile", "~/.secrets/alpha", "~/.secrets/beta"})
+			assertPasswordCalls(t, applyPasswordCalls, []bool{false})
+			assertFileContents(t, publicDestination, publicContents)
+			assertFileContents(t, firstDestination, firstSecret)
+			assertFileContents(t, secondDestination, secondSecret)
+			assertPermissions(t, publicDestination, 0o644)
+			assertPermissions(t, firstDestination, 0o600)
+			assertPermissions(t, secondDestination, 0o600)
+			assertRepositoryDoesNotContain(t, environment.repository, firstSecret)
+			assertRepositoryDoesNotContain(t, environment.repository, secondSecret)
+		})
 	}
-	assertStrings(t, result.Applied, []string{"~/.profile", "~/.secrets/alpha", "~/.secrets/beta"})
-	assertStrings(t, result.Skipped, nil)
-	assertPasswordCalls(t, applyPasswordCalls, []bool{false})
-	assertFileContents(t, publicDestination, publicContents)
-	assertFileContents(t, firstDestination, firstSecret)
-	assertFileContents(t, secondDestination, secondSecret)
-	assertPermissions(t, publicDestination, 0o644)
-	assertPermissions(t, firstDestination, 0o600)
-	assertPermissions(t, secondDestination, 0o600)
-	assertRepositoryDoesNotContain(t, environment.repository, firstSecret)
-	assertRepositoryDoesNotContain(t, environment.repository, secondSecret)
 }
 
 func TestApplyRejectsDarwinCaseAndUnicodeDestinationAliases(t *testing.T) {
@@ -1336,7 +1335,6 @@ func TestApplyRejectsDarwinCaseAndUnicodeDestinationAliases(t *testing.T) {
 				t.Fatalf("Apply(aliased destinations) error = %v, want ErrDestinationConflict", err)
 			}
 			assertStrings(t, result.Applied, nil)
-			assertStrings(t, result.Skipped, nil)
 			assertPasswordCalls(t, passwordCalls, nil)
 			for _, entry := range current.Entries {
 				assertPathDoesNotExist(t, filepath.Join(environment.repository, filepath.FromSlash(entry.Source)))
@@ -1364,7 +1362,6 @@ func TestApplyPrioritizesProtectedRootErrorsOverDestinationAliases(t *testing.T)
 		t.Fatalf("Apply(protected alias conflict) returned lower-priority ErrDestinationConflict: %v", err)
 	}
 	assertStrings(t, result.Applied, nil)
-	assertStrings(t, result.Skipped, nil)
 	assertPasswordCalls(t, passwordCalls, nil)
 }
 
@@ -1394,35 +1391,10 @@ func TestApplyRechecksDestinationAliasesAfterPassword(t *testing.T) {
 		t.Fatalf("Apply(password-time destination alias) error = %v, want ErrDestinationConflict", err)
 	}
 	assertStrings(t, result.Applied, nil)
-	assertStrings(t, result.Skipped, nil)
 	assertPasswordCalls(t, passwordCalls, []bool{false})
 	for _, entry := range current.Entries {
 		assertPathDoesNotExist(t, filepath.Join(environment.repository, filepath.FromSlash(entry.Source)))
 	}
-}
-
-func TestApplySkipsExcludedDarwinDestinationAlias(t *testing.T) {
-	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "darwin", xdgConfigUnderHomeCase: true})
-	applied := mustLogicalEntry(t, "${XDG_CONFIG_HOME}/item", false)
-	excluded := mustLogicalEntry(t, "~/config/ITEM", true)
-	excluded.ExcludePlatforms = []string{"darwin"}
-	current := manifest.New()
-	current.Crypto = mustCryptoMetadata(t)
-	current.Entries = []manifest.Entry{applied, excluded}
-	mustSaveManifest(t, environment, current)
-	storedContents := []byte("applicable snapshot\n")
-	mustWriteFile(t, filepath.Join(environment.repository, filepath.FromSlash(applied.Source)), storedContents, 0o644)
-	var passwordCalls []bool
-
-	result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &passwordCalls))
-	if err != nil {
-		t.Fatalf("Apply(excluded alias) error = %v", err)
-	}
-	assertStrings(t, result.Applied, []string{applied.Path})
-	assertStrings(t, result.Skipped, []string{excluded.Path})
-	assertPasswordCalls(t, passwordCalls, nil)
-	assertFileContents(t, filepath.Join(environment.xdgConfigHome, "item"), storedContents)
-	assertPathDoesNotExist(t, filepath.Join(environment.repository, filepath.FromSlash(excluded.Source)))
 }
 
 func TestApplyKeepsLinuxCaseVariantsDistinct(t *testing.T) {
@@ -1440,7 +1412,6 @@ func TestApplyKeepsLinuxCaseVariantsDistinct(t *testing.T) {
 		t.Fatalf("Apply(Linux case variants) error = %v", err)
 	}
 	assertStrings(t, result.Applied, []string{first.Path, second.Path})
-	assertStrings(t, result.Skipped, nil)
 }
 
 func TestApplyReplacesLeafSymlinkWithoutFollowingItsTarget(t *testing.T) {
@@ -1609,49 +1580,6 @@ func TestApplyPreflightsCorruptedSensitiveDataBeforeChangingPublicDestinations(t
 	assertFileContents(t, publicDestination, []byte("local public must remain\n"))
 }
 
-func TestApplyHonorsPlatformExclusions(t *testing.T) {
-	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "linux"})
-	darwinOnly := mustWriteFile(t, filepath.Join(environment.home, ".darwin-only"), []byte("darwin\n"), 0o644)
-	linuxOnly := mustWriteFile(t, filepath.Join(environment.home, ".linux-only"), []byte("linux\n"), 0o644)
-	shared := mustWriteFile(t, filepath.Join(environment.home, ".shared"), []byte("shared\n"), 0o644)
-
-	if _, err := environment.service.Add([]string{darwinOnly}, app.AddOptions{ExcludePlatforms: []string{"linux"}}); err != nil {
-		t.Fatalf("Add(darwin-only) error = %v", err)
-	}
-	if _, err := environment.service.Add([]string{linuxOnly}, app.AddOptions{ExcludePlatforms: []string{"darwin"}}); err != nil {
-		t.Fatalf("Add(linux-only) error = %v", err)
-	}
-	if _, err := environment.service.Add([]string{shared}, app.AddOptions{}); err != nil {
-		t.Fatalf("Add(shared) error = %v", err)
-	}
-	removeDestinations(t, darwinOnly, linuxOnly, shared)
-
-	linuxResult, err := environment.service.Apply(nil)
-	if err != nil {
-		t.Fatalf("linux Apply() error = %v", err)
-	}
-	assertStrings(t, linuxResult.Applied, []string{"~/.linux-only", "~/.shared"})
-	assertStrings(t, linuxResult.Skipped, []string{"~/.darwin-only"})
-	assertPathDoesNotExist(t, darwinOnly)
-	assertFileContents(t, linuxOnly, []byte("linux\n"))
-	assertFileContents(t, shared, []byte("shared\n"))
-
-	removeDestinations(t, darwinOnly, linuxOnly, shared)
-	darwinService, err := app.New(environment.store, environment.resolver, "darwin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	darwinResult, err := darwinService.Apply(nil)
-	if err != nil {
-		t.Fatalf("darwin Apply() error = %v", err)
-	}
-	assertStrings(t, darwinResult.Applied, []string{"~/.darwin-only", "~/.shared"})
-	assertStrings(t, darwinResult.Skipped, []string{"~/.linux-only"})
-	assertFileContents(t, darwinOnly, []byte("darwin\n"))
-	assertPathDoesNotExist(t, linuxOnly)
-	assertFileContents(t, shared, []byte("shared\n"))
-}
-
 func TestXDGCustomAndFallbackLocations(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -1777,7 +1705,6 @@ func TestApplyRejectsLocalStateDestinationBeforePasswordOrMutation(t *testing.T)
 		t.Fatalf("Apply() error is not actionable: %v", err)
 	}
 	assertStrings(t, result.Applied, nil)
-	assertStrings(t, result.Skipped, nil)
 	assertPasswordCalls(t, passwordCalls, nil)
 	assertFileContents(t, environment.store.Path(), stateBefore)
 	assertFileContents(t, publicDestination, []byte("local public must remain\n"))
@@ -1949,61 +1876,12 @@ func TestApplyRejectsHardLinkedLocalStateDestination(t *testing.T) {
 				t.Fatalf("Apply(hard-link destination) error = %v, want ErrProtectedLocalState", err)
 			}
 			assertStrings(t, result.Applied, nil)
-			assertStrings(t, result.Skipped, nil)
 			assertFileContents(t, manifestPath, manifestBefore)
 			assertFileContents(t, environment.store.Path(), stateBefore)
 			assertFileContents(t, target, targetBefore)
 			assertFileContents(t, alias, targetBefore)
 		})
 	}
-}
-
-func TestApplySkipsExcludedLocalStateDestination(t *testing.T) {
-	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "linux"})
-	destination := mustWriteFile(t, filepath.Join(environment.home, ".restore"), []byte("stored\n"), 0o644)
-	if _, err := environment.service.Add([]string{destination}, app.AddOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	excludedSensitive := mustWriteFile(t, filepath.Join(environment.home, ".excluded-secret"), []byte("stored secret\n"), 0o600)
-	if _, err := environment.service.Add([]string{excludedSensitive}, app.AddOptions{
-		Sensitive:        true,
-		ExcludePlatforms: []string{"linux"},
-		Password:         recordingPasswordProvider(testPassword, nil),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(destination); err != nil {
-		t.Fatal(err)
-	}
-	mustWriteFile(t, excludedSensitive, []byte("local excluded secret must remain\n"), 0o600)
-	stateBefore := mustReadFile(t, environment.store.Path())
-
-	protectedLogical, err := environment.resolver.Normalize(environment.store.Path())
-	if err != nil {
-		t.Fatal(err)
-	}
-	protectedSource, err := manifest.SourceFor(protectedLogical, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	current := mustLoadManifest(t, environment)
-	current.Entries = append(current.Entries, manifest.Entry{
-		Path: protectedLogical, Source: protectedSource, Sensitive: true, ExcludePlatforms: []string{"linux"},
-	})
-	mustSaveManifest(t, environment, current)
-	assertPathDoesNotExist(t, filepath.Join(environment.repository, filepath.FromSlash(protectedSource)))
-
-	var passwordCalls []bool
-	result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &passwordCalls))
-	if err != nil {
-		t.Fatalf("Apply() error = %v", err)
-	}
-	assertStrings(t, result.Applied, []string{"~/.restore"})
-	assertStrings(t, result.Skipped, []string{"~/.excluded-secret", protectedLogical})
-	assertPasswordCalls(t, passwordCalls, nil)
-	assertFileContents(t, destination, []byte("stored\n"))
-	assertFileContents(t, excludedSensitive, []byte("local excluded secret must remain\n"))
-	assertFileContents(t, environment.store.Path(), stateBefore)
 }
 
 func TestRemoveCleansLegacyLocalStateEntryWithoutChangingBinding(t *testing.T) {
@@ -2125,7 +2003,6 @@ func TestApplyRejectsRepositoryDestinationsBeforePasswordSourceOrMutation(t *tes
 				t.Fatalf("Apply(%q) error is not actionable: %v", test.destination, err)
 			}
 			assertStrings(t, result.Applied, nil)
-			assertStrings(t, result.Skipped, nil)
 			assertPasswordCalls(t, passwordCalls, nil)
 			assertFileContents(t, earlierDestination, localEarlier)
 			assertFileContents(t, manifestPath, manifestBefore)
@@ -2262,7 +2139,6 @@ func TestApplyRechecksRepositorySymlinkAfterPasswordBeforeMutation(t *testing.T)
 		t.Fatalf("Apply(late repository symlink) error = %v, want ErrProtectedRepository", err)
 	}
 	assertStrings(t, result.Applied, nil)
-	assertStrings(t, result.Skipped, nil)
 	assertPasswordCalls(t, passwordCalls, []bool{false})
 	assertFileContents(t, earlierDestination, earlierLocal)
 	assertFileContents(t, earlierSource, earlierSourceBefore)
@@ -2271,49 +2147,6 @@ func TestApplyRechecksRepositorySymlinkAfterPasswordBeforeMutation(t *testing.T)
 	if info, statErr := os.Lstat(lateDestination); statErr != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("late destination was not left as a repository symlink: mode = %v, error = %v", info, statErr)
 	}
-}
-
-func TestApplySkipsExcludedSensitiveRepositoryDestination(t *testing.T) {
-	environment := newTestEnvironment(t, testEnvironmentOptions{platform: "linux", repositoryUnderHome: true, customXDG: true})
-	publicContents := []byte("stored public restore\n")
-	publicDestination := mustWriteFile(t, filepath.Join(environment.home, ".restore-outside-repository"), publicContents, 0o644)
-	if _, err := environment.service.Add([]string{publicDestination}, app.AddOptions{}); err != nil {
-		t.Fatalf("Add(public) error = %v", err)
-	}
-	cryptoSeed := mustWriteFile(t, filepath.Join(environment.home, ".excluded-crypto-seed"), []byte("crypto seed\n"), 0o600)
-	if _, err := environment.service.Add([]string{cryptoSeed}, app.AddOptions{
-		Sensitive: true,
-		Password:  recordingPasswordProvider(testPassword, nil),
-	}); err != nil {
-		t.Fatalf("Add(crypto seed) error = %v", err)
-	}
-	base := mustLoadManifest(t, environment)
-	publicEntry := mustFindEntry(t, base, "~/.restore-outside-repository")
-	protectedEntry := mustEntryForDestination(t, environment, filepath.Join(environment.repositoryInput, manifest.Filename), true)
-	protectedEntry.ExcludePlatforms = []string{"linux"}
-	current := manifest.New()
-	current.Crypto = base.Crypto
-	current.Entries = []manifest.Entry{publicEntry, protectedEntry}
-	mustSaveManifest(t, environment, current)
-	protectedSource := filepath.Join(environment.repository, filepath.FromSlash(protectedEntry.Source))
-	assertPathDoesNotExist(t, protectedSource)
-	if err := os.Remove(publicDestination); err != nil {
-		t.Fatal(err)
-	}
-	manifestPath := filepath.Join(environment.repository, manifest.Filename)
-	manifestBefore := mustReadFile(t, manifestPath)
-
-	var passwordCalls []bool
-	result, err := environment.service.Apply(recordingPasswordProvider(testPassword, &passwordCalls))
-	if err != nil {
-		t.Fatalf("Apply() error = %v", err)
-	}
-	assertStrings(t, result.Applied, []string{publicEntry.Path})
-	assertStrings(t, result.Skipped, []string{protectedEntry.Path})
-	assertPasswordCalls(t, passwordCalls, nil)
-	assertFileContents(t, publicDestination, publicContents)
-	assertFileContents(t, manifestPath, manifestBefore)
-	assertPathDoesNotExist(t, protectedSource)
 }
 
 func TestLegacyRepositoryEntrySupportsListShowAndRemoveWithoutChangingDestination(t *testing.T) {

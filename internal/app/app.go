@@ -99,9 +99,8 @@ func (s *Service) Init(input string) (string, error) {
 
 // AddOptions controls metadata and encryption for newly managed files.
 type AddOptions struct {
-	Sensitive        bool
-	ExcludePlatforms []string
-	Password         PasswordProvider
+	Sensitive bool
+	Password  PasswordProvider
 }
 
 // AddResult separates new entries from idempotently skipped paths.
@@ -162,10 +161,6 @@ func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
 func (s *Service) addWithHooks(inputs []string, options AddOptions, hooks addHooks) (AddResult, error) {
 	if len(inputs) == 0 {
 		return AddResult{}, errors.New("add requires at least one path")
-	}
-	exclusions, err := normalizePlatforms(options.ExcludePlatforms)
-	if err != nil {
-		return AddResult{}, err
 	}
 	repo, current, release, err := s.openLocked()
 	if err != nil {
@@ -315,10 +310,9 @@ func (s *Service) addWithHooks(inputs []string, options AddOptions, hooks addHoo
 		}
 		created = append(created, item.source)
 		updated.Entries = append(updated.Entries, manifest.Entry{
-			Path:             item.logical,
-			Source:           item.source,
-			Sensitive:        options.Sensitive,
-			ExcludePlatforms: append([]string(nil), exclusions...),
+			Path:      item.logical,
+			Source:    item.source,
+			Sensitive: options.Sensitive,
 		})
 		result.Added = append(result.Added, item.logical)
 	}
@@ -491,10 +485,9 @@ func (s *Service) Show(input string, output io.Writer, passwordProvider Password
 	return nil
 }
 
-// ApplyResult reports applicable restored paths and platform-filtered paths.
+// ApplyResult reports restored paths.
 type ApplyResult struct {
 	Applied []string
-	Skipped []string
 }
 
 type applyDestination struct {
@@ -567,7 +560,7 @@ func (s *Service) ensureNoApplyDestinationConflicts(destinations []applyDestinat
 }
 
 // Apply restores repository versions to their runtime destinations. It first
-// preflights every applicable source and authenticates every ciphertext, so
+// preflights every source and authenticates every ciphertext, so
 // repository corruption cannot cause a half-applied invocation.
 func (s *Service) Apply(passwordProvider PasswordProvider) (ApplyResult, error) {
 	return s.applyWithHooks(passwordProvider, applyHooks{})
@@ -582,22 +575,16 @@ func (s *Service) applyWithHooks(passwordProvider PasswordProvider, hooks applyH
 	entries := append([]manifest.Entry(nil), current.Entries...)
 	manifest.SortEntries(entries)
 
-	applicable := make([]manifest.Entry, 0, len(entries))
 	result := ApplyResult{}
 	hasSensitive := false
 	for _, entry := range entries {
-		if excluded(entry, s.platform) {
-			result.Skipped = append(result.Skipped, entry.Path)
-			continue
-		}
-		applicable = append(applicable, entry)
 		hasSensitive = hasSensitive || entry.Sensitive
 	}
 	boundary, err := s.loadControlBoundary(repo)
 	if err != nil {
 		return result, err
 	}
-	destinations, err := s.resolveApplyDestinations(applicable)
+	destinations, err := s.resolveApplyDestinations(entries)
 	if err != nil {
 		return result, err
 	}
@@ -657,7 +644,7 @@ func (s *Service) applyWithHooks(passwordProvider PasswordProvider, hooks applyH
 			sensitiveBytes += int64(len(contents))
 			if sensitiveBytes > maxApplySensitiveBytes {
 				cryptox.ZeroBytes(contents)
-				return result, fmt.Errorf("applicable sensitive plaintext exceeds v0.1 aggregate preflight limit of %d bytes", maxApplySensitiveBytes)
+				return result, fmt.Errorf("sensitive plaintext exceeds v0.1 aggregate preflight limit of %d bytes", maxApplySensitiveBytes)
 			}
 			fileMode = 0o600
 			directoryMode = 0o700
@@ -932,22 +919,6 @@ func (p addIgnorePolicy) ignores(candidate string) (bool, error) {
 	return physicalAncestorMatches(p.kubeCacheInfo, candidate)
 }
 
-func normalizePlatforms(values []string) ([]string, error) {
-	set := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if err := ValidatePlatform(value); err != nil {
-			return nil, err
-		}
-		set[value] = struct{}{}
-	}
-	result := make([]string, 0, len(set))
-	for value := range set {
-		result = append(result, value)
-	}
-	sort.Strings(result)
-	return result, nil
-}
-
 func unlock(current manifest.Manifest, provider PasswordProvider) ([]byte, error) {
 	if current.Crypto == nil {
 		return nil, fmt.Errorf("%w: sensitive entries have no crypto metadata", manifest.ErrInvalidManifest)
@@ -961,15 +932,6 @@ func unlock(current manifest.Manifest, provider PasswordProvider) ([]byte, error
 	}
 	defer cryptox.ZeroBytes(password)
 	return cryptox.Unlock(password, *current.Crypto)
-}
-
-func excluded(entry manifest.Entry, platform string) bool {
-	for _, excludedPlatform := range entry.ExcludePlatforms {
-		if excludedPlatform == platform {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Service) loadManagedFileIdentities(entries []manifest.Entry) ([]managedFileIdentity, error) {
@@ -1537,19 +1499,8 @@ func pathWithin(root, target string) (bool, error) {
 
 // FormatEntry renders one stable, human-readable list line.
 func FormatEntry(entry manifest.Entry) string {
-	var annotations []string
 	if entry.Sensitive {
-		annotations = append(annotations, "sensitive")
+		return entry.Path + " [sensitive]"
 	}
-	if len(entry.ExcludePlatforms) > 0 {
-		annotations = append(annotations, "exclude: "+strings.Join(entry.ExcludePlatforms, ", "))
-	}
-	if len(annotations) == 0 {
-		return entry.Path
-	}
-	parts := make([]string, len(annotations))
-	for index, annotation := range annotations {
-		parts[index] = "[" + annotation + "]"
-	}
-	return entry.Path + " " + strings.Join(parts, " ")
+	return entry.Path
 }

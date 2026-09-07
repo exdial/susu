@@ -132,27 +132,6 @@ func TestValidateRejectsDuplicatePathsAndSources(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsUnsupportedPlatforms(t *testing.T) {
-	for _, platform := range []string{"windows", "freebsd", ""} {
-		t.Run(platform, func(t *testing.T) {
-			value := New()
-			value.Entries = []Entry{{
-				Path:             "~/tool/config",
-				Source:           "public/tool/config",
-				ExcludePlatforms: []string{platform},
-			}}
-
-			err := Validate(value)
-			if !errors.Is(err, ErrInvalidManifest) {
-				t.Fatalf("Validate() error = %v, want ErrInvalidManifest", err)
-			}
-			if !strings.Contains(err.Error(), "unsupported platform") {
-				t.Fatalf("Validate() error = %q, want unsupported-platform context", err)
-			}
-		})
-	}
-}
-
 func TestValidateRejectsSensitiveEntryWithoutCrypto(t *testing.T) {
 	value := New()
 	value.Entries = []Entry{{
@@ -369,7 +348,7 @@ func TestSaveAtomicallyReplacesAndSortsEntries(t *testing.T) {
 		Entries: []Entry{
 			{Path: "~/zeta", Source: "public/zeta"},
 			{Path: "~/alpha", Source: "encrypted/alpha.enc", Sensitive: true},
-			{Path: "~/middle", Source: "public/middle", ExcludePlatforms: []string{"darwin", "linux"}},
+			{Path: "~/middle", Source: "public/middle"},
 		},
 	}
 	if err := Save(filename, replacement); err != nil {

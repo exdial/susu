@@ -17,7 +17,6 @@
 - Store individual files or recursively add directories.
 - Encrypt sensitive files with one password per repository.
 - Share portable HOME and XDG config paths across machines.
-- Exclude entries explicitly on macOS or Linux.
 - Inspect stored files and restore them with predictable one-way commands.
 
 ## Installation
@@ -54,7 +53,6 @@ git init "$HOME/src/dotfiles"
 
 susu init "$HOME/src/dotfiles"
 susu add "$HOME/.zshrc" "$HOME/.gitconfig"
-susu add --exclude-platform linux "$HOME/.hammerspoon/init.lua"
 susu add --sensitive "$HOME/.kube/config"
 
 susu ls
@@ -74,7 +72,7 @@ susu ls
 susu apply
 ```
 
-> `susu apply` replaces applicable managed destination files. Review `susu ls` and the repository before applying; `susu` does not create backups or resolve conflicts.
+> `susu apply` replaces all managed destination files. Review `susu ls` and the repository before applying; `susu` does not create backups or resolve conflicts.
 
 ## Commands
 
@@ -98,7 +96,7 @@ source <(susu completion zsh)                   # Zsh
 
 Running `susu` without a command shows a short onboarding before initialization, or the active repository and managed file count afterward. Use `susu --help` for the complete command overview.
 
-`add` captures a file only when it first becomes managed; it does not synchronize entries that already exist. Recursive adds and explicit regular-file or real-directory inputs ignore `~/.kube/cache` and everything below it. Sensitive classification and platform exclusions are always explicit. The machine-local `susu` state directory, active repository worktree, and Git common administrative directory are reserved control roots: `add` rejects inputs that overlap or contain them, and `apply` refuses applicable manifest destinations that would overlap them.
+`add` captures a file only when it first becomes managed; it does not synchronize entries that already exist. Recursive adds and explicit regular-file or real-directory inputs ignore `~/.kube/cache` and everything below it. Sensitive classification is always explicit. The machine-local `susu` state directory, active repository worktree, and Git common administrative directory are reserved control roots: `add` rejects inputs that overlap or contain them, and `apply` refuses manifest destinations that would overlap them.
 
 ## A little lore
 

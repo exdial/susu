@@ -60,7 +60,6 @@ func TestHelp(t *testing.T) {
 				"Add files or directories to susu.",
 				"Usage:\n  susu add [options] <path...>",
 				"--sensitive",
-				"--exclude-platform <value>",
 				"Examples:",
 				"susu add ~/.config/nvim",
 			},
@@ -111,7 +110,6 @@ func TestHelp(t *testing.T) {
 				"Apply managed files to this machine.",
 				"Usage:\n  susu apply",
 				"replace their destinations atomically",
-				"Platform exclusions are",
 				"local state and repository destinations are rejected",
 			},
 		},
@@ -366,28 +364,6 @@ func TestArgumentCardinality(t *testing.T) {
 	}
 }
 
-func TestRepeatedExcludePlatformReachesAppValidation(t *testing.T) {
-	fixture := newCLIFixture(t)
-	stdout, stderr, err := fixture.run(
-		"add",
-		"--exclude-platform", "windows",
-		"--exclude-platform", "linux",
-		"~/does-not-need-to-exist",
-	)
-	if !errors.Is(err, app.ErrUnsupportedPlatform) {
-		t.Fatalf("Run(add with repeated --exclude-platform) error = %v, want app.ErrUnsupportedPlatform", err)
-	}
-	if !strings.Contains(err.Error(), `"windows"`) {
-		t.Fatalf("Run(add with repeated --exclude-platform) error does not identify the invalid value: %v", err)
-	}
-	if stdout != "" || stderr != "" {
-		t.Fatalf("Run(add with repeated --exclude-platform) output = stdout %q, stderr %q; want both empty", stdout, stderr)
-	}
-	if fixture.passwordCalls != 0 {
-		t.Fatalf("Run(add with repeated --exclude-platform) called the password provider %d times", fixture.passwordCalls)
-	}
-}
-
 func TestPublicCLIWorkflow(t *testing.T) {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
@@ -450,10 +426,10 @@ func TestPublicCLIWorkflow(t *testing.T) {
 	}
 
 	xdgDestination := filepath.Join(fixture.xdgConfigHome, "argocd", "config.yaml")
-	xdgExcludedDestination := filepath.Join(fixture.xdgConfigHome, "argocd", "linux.yaml")
+	xdgSettingsDestination := filepath.Join(fixture.xdgConfigHome, "argocd", "settings.yaml")
 	for path, contents := range map[string][]byte{
 		xdgDestination:         []byte("current-context: production\n"),
-		xdgExcludedDestination: []byte("platform: linux\n"),
+		xdgSettingsDestination: []byte("theme: dark\n"),
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
@@ -469,14 +445,14 @@ func TestPublicCLIWorkflow(t *testing.T) {
 	if got := runSuccessfully(t, fixture, "add", xdgDestination); got != "already managed ~/.config/argocd/config.yaml\n" {
 		t.Fatalf("duplicate XDG add stdout = %q", got)
 	}
-	if got := runSuccessfully(t, fixture, "add", "--exclude-platform", "linux", xdgExcludedDestination); got != "added ~/.config/argocd/linux.yaml\n" {
-		t.Fatalf("excluded XDG add stdout = %q", got)
+	if got := runSuccessfully(t, fixture, "add", xdgSettingsDestination); got != "added ~/.config/argocd/settings.yaml\n" {
+		t.Fatalf("XDG settings add stdout = %q", got)
 	}
-	wantList := "~/.config/argocd/config.yaml\n~/.config/argocd/linux.yaml [exclude: linux]\n"
+	wantList := "~/.config/argocd/config.yaml\n~/.config/argocd/settings.yaml\n"
 	if got := runSuccessfully(t, fixture, "ls"); got != wantList {
 		t.Fatalf("XDG ls stdout = %q, want %q", got, wantList)
 	}
-	if got := runSuccessfully(t, fixture, "apply"); got != "applied ~/.config/argocd/config.yaml\nskipped ~/.config/argocd/linux.yaml [excluded on current platform]\n" {
+	if got := runSuccessfully(t, fixture, "apply"); got != "applied ~/.config/argocd/config.yaml\napplied ~/.config/argocd/settings.yaml\n" {
 		t.Fatalf("XDG apply stdout = %q", got)
 	}
 
@@ -488,7 +464,7 @@ func TestPublicCLIWorkflow(t *testing.T) {
 		t.Fatalf("susu.json does not retain the XDG logical path:\n%s", manifestContents)
 	}
 
-	if got := runSuccessfully(t, fixture, "rm", xdgDestination, xdgExcludedDestination); got != "removed ~/.config/argocd/config.yaml\nremoved ~/.config/argocd/linux.yaml\n" {
+	if got := runSuccessfully(t, fixture, "rm", xdgDestination, xdgSettingsDestination); got != "removed ~/.config/argocd/config.yaml\nremoved ~/.config/argocd/settings.yaml\n" {
 		t.Fatalf("XDG rm stdout = %q", got)
 	}
 	stdout, stderr, err := fixture.run("rm", xdgDestination)

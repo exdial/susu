@@ -13,7 +13,7 @@ The implemented command model has explicit data directions:
 | `rm <path...>` | Stop managing exact files | manifest and repository storage deletion |
 | `ls` (`list` alias) | Inspect managed membership | manifest → stdout |
 | `show <path>` | Emit one stored snapshot | repository → stdout |
-| `apply` | Restore applicable snapshots | repository → filesystem |
+| `apply` | Restore all managed snapshots | repository → filesystem |
 | `completion <shell>` | Emit static shell integration | CLI metadata → stdout |
 
 `add` captures content only when an entry first becomes managed. Repeating it for an existing entry does not refresh the repository snapshot. There is no background service, key cache, repository auto-discovery, or command that reconciles local and stored changes.
@@ -47,7 +47,7 @@ The Go packages follow the operational boundaries rather than the command names 
 | --- | --- |
 | `cmd/susu` | Process entry point, top-level error reporting, and exit status |
 | `internal/cli` | Command and flag parsing, help text, stdout/stderr formatting, and no-echo password input from `/dev/tty` |
-| `internal/app` | Command semantics, contextual repository overview data, platform filtering, operation ordering, rollback decisions, apply preflight, and orchestration of state and repository locks |
+| `internal/app` | Command semantics, contextual repository overview data, operation ordering, rollback decisions, apply preflight, and orchestration of state and repository locks |
 | `internal/state` | Machine-local repository binding, strict state decoding, atomic state replacement, permissions, and the per-state-home advisory lock |
 | `internal/paths` | Lexical conversion between concrete filesystem paths and portable logical destinations, HOME-relative presentation, and comparison-only platform keys for apply safety |
 | `internal/manifest` | Manifest schema, structural validation, deterministic source mapping, ordering, and atomic `susu.json` replacement |
@@ -89,7 +89,7 @@ The local binding is intentionally small and unversioned:
 
 The state decoder accepts only that field, rejects trailing data, requires a clean absolute path, and limits the file to 64 KiB. Writes use a `0700` state directory and a `0600` state file, with same-directory temporary-file replacement and file/directory synchronization.
 
-The private `susu` state directory, active repository worktree, and Git common administrative directory are protected local control roots. `add` rejects an explicit input that is inside any root, names the root itself, or is an ancestor containing it. `apply` rejects every applicable manifest destination that overlaps one after platform filtering. Canonical, symlink, physical, and case aliases exposed by the filesystem are included; the small finite set of local-state files additionally receives opened-descriptor hard-link identity checks. For a linked worktree, the active worktree and shared Git common directory can be disjoint and are protected separately. `ls`, `show`, and `rm` remain available for inspecting and removing legacy entries that predate this protection.
+The private `susu` state directory, active repository worktree, and Git common administrative directory are protected local control roots. `add` rejects an explicit input that is inside any root, names the root itself, or is an ancestor containing it. `apply` rejects every manifest destination that overlaps one. Canonical, symlink, physical, and case aliases exposed by the filesystem are included; the small finite set of local-state files additionally receives opened-descriptor hard-link identity checks. For a linked worktree, the active worktree and shared Git common directory can be disjoint and are protected separately. `ls`, `show`, and `rm` remain available for inspecting and removing legacy entries that predate this protection.
 
 ### Binding lifecycle
 
@@ -218,13 +218,6 @@ The `source` field is therefore validated data, not a user-selectable pointer. I
     {
       "path": "${XDG_CONFIG_HOME}/starship.toml",
       "source": "public/.config/starship.toml"
-    },
-    {
-      "path": "~/.hammerspoon/init.lua",
-      "source": "public/.hammerspoon/init.lua",
-      "excludePlatforms": [
-        "linux"
-      ]
     }
   ]
 }
@@ -237,11 +230,10 @@ Each entry describes exactly one file:
 | `path` | Canonical logical destination and stable identity |
 | `source` | Deterministic repository-relative storage path |
 | `sensitive` | Optional boolean; omitted is public |
-| `excludePlatforms` | Optional unique list containing `darwin`, `linux`, or both |
 
 The optional top-level `crypto` object contains the metadata needed to unlock sensitive entries. Sensitive entries require that metadata. The reverse is not required: after the last sensitive entry is removed, the crypto metadata remains, so a later sensitive add reuses the established repository master key and password.
 
-Sensitivity and platform policy come only from explicit `add` options; neither file contents nor path names imply either classification. Exclusions affect `apply` only. Excluded entries remain visible to `ls` and `show`, removable with `rm`, and stored in the repository. An entry excluding both supported platforms is skipped by `apply` on both.
+Sensitivity comes only from the explicit `add --sensitive` option; neither file contents nor path names imply sensitive classification.
 
 ### Independent format versions
 
@@ -266,11 +258,10 @@ A valid manifest also has these properties:
 - no managed path is an ancestor of another managed path;
 - no repository source is an ancestor of another source;
 - each source equals the deterministic mapping of its logical path and sensitivity;
-- every platform value is `darwin` or `linux`, with no duplicates within one entry;
 - each sensitive entry has valid repository crypto metadata; and
 - decoded path and source strings contain no Unicode control characters, U+2028, or U+2029 and satisfy the canonical path rules.
 
-CLI-created exclusions are deduplicated and sorted. Entries are sorted by logical path whenever the manifest is saved and whenever `ls` or `apply` consumes an ordered view.
+Entries are sorted by logical path whenever the manifest is saved and whenever `ls` or `apply` consumes an ordered view.
 
 Manifest validity is structural. Loading the manifest does not prove that every referenced source exists or is readable; commands that need sources preflight them under the repository lock.
 
@@ -299,8 +290,7 @@ Directory expansion has no user-configurable ignore mechanism. It has one built-
 
 ```mermaid
 flowchart TB
-    Manifest[Load and validate manifest] --> Filter[Filter platform exclusions]
-    Filter --> InitialSafety[Check protected roots and destination aliases]
+    Manifest[Load and validate manifest] --> InitialSafety[Check protected roots and destination aliases]
     InitialSafety --> Unlock[Unlock once if sensitive data is needed]
     Unlock --> UnlockSafety[Repeat complete destination safety check]
     UnlockSafety --> Preflight[Open sources and authenticate ciphertext]
@@ -332,21 +322,20 @@ Repository scaffolding and local binding are separate commits. If binding valida
 
 For one invocation, `add`:
 
-1. validates and normalizes platform exclusions;
-2. opens the bound repository and loads the manifest under both locks;
-3. rejects inputs that overlap or contain the private state directory, active worktree, or Git common directory;
-4. discovers and sorts all regular-file candidates;
-5. classifies exact logical entries and different logical candidates that share filesystem identity with an existing managed regular leaf as already managed;
-6. rejects the complete invocation if two new candidates share one physical file identity;
-7. unlocks or initializes repository crypto once when at least one new sensitive entry exists;
-8. revalidates every new candidate command-wide after the password callback;
-9. repeats command-wide physical-identity and boundary checks before each read, then reads through the same validated no-follow descriptor with a 512 MiB per-file limit;
-10. encrypts sensitive bytes in memory or retains public bytes;
-11. atomically installs each new repository source without replacing an existing path;
-12. rechecks every candidate once more before the manifest transition; and
-13. atomically replaces `susu.json` after all new sources are installed.
+1. opens the bound repository and loads the manifest under both locks;
+2. rejects inputs that overlap or contain the private state directory, active worktree, or Git common directory;
+3. discovers and sorts all regular-file candidates;
+4. classifies exact logical entries and different logical candidates that share filesystem identity with an existing managed regular leaf as already managed;
+5. rejects the complete invocation if two new candidates share one physical file identity;
+6. unlocks or initializes repository crypto once when at least one new sensitive entry exists;
+7. revalidates every new candidate command-wide after the password callback;
+8. repeats command-wide physical-identity and boundary checks before each read, then reads through the same validated no-follow descriptor with a 512 MiB per-file limit;
+9. encrypts sensitive bytes in memory or retains public bytes;
+10. atomically installs each new repository source without replacing an existing path;
+11. rechecks every candidate once more before the manifest transition; and
+12. atomically replaces `susu.json` after all new sources are installed.
 
-Physical identity uses `os.SameFile` metadata obtained from opened candidate descriptors. Existing managed leaves are inspected with `Lstat`: a regular hard link, case alias, or normalization alias exposed by the filesystem is recognized, while a leaf symlink does not make its target already managed. Already-managed entries keep their original source bytes, sensitivity, and exclusions. A sensitive invocation containing only exact or physical aliases of already-managed paths does not prompt for a password. Existing unreferenced data at a candidate's deterministic source path is treated as a collision and is not overwritten. A late identity conflict rolls back repository sources created earlier in that invocation.
+Physical identity uses `os.SameFile` metadata obtained from opened candidate descriptors. Existing managed leaves are inspected with `Lstat`: a regular hard link, case alias, or normalization alias exposed by the filesystem is recognized, while a leaf symlink does not make its target already managed. Already-managed entries keep their original source bytes and sensitivity. A sensitive invocation containing only exact or physical aliases of already-managed paths does not prompt for a password. Existing unreferenced data at a candidate's deterministic source path is treated as a collision and is not overwritten. A late identity conflict rolls back repository sources created earlier in that invocation.
 
 The no-overwrite source install uses a random same-directory temporary file, file synchronization, and an atomic hard link to the final name. This preserves the rule that `add` starts management rather than silently updating an existing snapshot.
 
@@ -358,7 +347,7 @@ The manifest is committed without the entries before source cleanup begins. Each
 
 ### `ls`: inspect manifest metadata
 
-`ls` (and its `list` alias) returns entries sorted by logical path and formats sensitivity and exclusions as annotations. It does not open source files, unlock the repository, inspect destinations, or expose low-level crypto metadata.
+`ls` (and its `list` alias) returns entries sorted by logical path and annotates sensitive entries. It does not open source files, unlock the repository, inspect destinations, or expose low-level crypto metadata.
 
 ### `show`: emit one stored snapshot
 
@@ -374,20 +363,19 @@ No plaintext temporary file is created by `show`. Standard output is the intenti
 
 ### `apply`: restore repository snapshots
 
-`apply` operates on a logical-path-sorted view of the manifest:
+`apply` operates on all managed entries in a logical-path-sorted view of the manifest:
 
-1. entries excluded for the selected platform are recorded as skipped and removed from further processing;
-2. every applicable logical destination is resolved, checked against protected control roots, and compared with every other applicable destination;
-3. the repository is unlocked once if any remaining entry is sensitive, followed immediately by another complete destination check;
-4. every applicable source is opened through a stable no-follow descriptor;
-5. each sensitive source is read, authenticated, and decrypted in memory before any destination changes;
-6. public source size and mode are checked while its descriptor remains open;
-7. all applicable destinations are checked again after source/authentication preflight; and
-8. the complete destination set is rechecked before each destination is staged and atomically renamed in logical-path order.
+1. every logical destination is resolved, checked against protected control roots, and compared with every other destination;
+2. the repository is unlocked once if any entry is sensitive, followed immediately by another complete destination check;
+3. every source is opened through a stable no-follow descriptor;
+4. each sensitive source is read, authenticated, and decrypted in memory before any destination changes;
+5. public source size and mode are checked while its descriptor remains open;
+6. all destinations are checked again after source/authentication preflight; and
+7. the complete destination set is rechecked before each destination is staged and atomically renamed in logical-path order.
 
-Platform filtering and the first protected-control-root and alias checks occur before password requirements and source access. An excluded sensitive entry therefore does not cause a password prompt by itself, while an applicable legacy entry already targeting a protected root or alias conflict fails before an unlock attempt. At every checkpoint, all protected-root checks complete before alias comparison so the protected error has priority. The later command-wide checks catch root namespace changes before protected or conflicting writes.
+The first protected-control-root and alias checks occur before password requirements and source access. A legacy entry already targeting a protected root or alias conflict fails before an unlock attempt. At every checkpoint, all protected-root checks complete before alias comparison so the protected error has priority. The later command-wide checks catch root namespace changes before protected or conflicting writes.
 
-Public sources are limited to 1 GiB by their preflight file size and then streamed from the retained descriptor during replacement. Sensitive serialized sources are read with the same 1 GiB limit. Decrypted sensitive plaintext remains in memory for the full preflight, with a 1 GiB aggregate limit across applicable sensitive entries.
+Public sources are limited to 1 GiB by their preflight file size and then streamed from the retained descriptor during replacement. Sensitive serialized sources are read with the same 1 GiB limit. Decrypted sensitive plaintext remains in memory for the full preflight, with a 1 GiB aggregate limit across all sensitive entries.
 
 Destination conflict checks canonicalize each configured logical root but do not resolve the complete destination. They compare exact and ancestor keys after component-wise Unicode canonical normalization and locale-independent case folding on Darwin; Linux preserves spelling. Darwin therefore fails closed for case or canonical-normalization variants even on a case-sensitive volume, while Linux retains its case-sensitive model. Processing components separately preserves path boundaries. Root-only canonicalization keeps a final symlink distinct from its target so normal replacement semantics remain unchanged.
 
@@ -402,7 +390,7 @@ For each destination, `apply`:
 
 A leaf symlink is replaced by the rename rather than followed. A symlink in any component below the logical HOME/XDG root causes an error. Existing regular files are replaced without a local-change comparison or backup.
 
-Confinement limits destinations to HOME/XDG roots and separately protects the private `susu` state directory, active repository worktree, and Git common administrative directory. A corresponding applicable manifest entry cannot write into those roots. Other machine control paths remain outside this runtime-specific boundary, and public sources and manifest policy are still unauthenticated, so manifest provenance and destination review remain part of the trust boundary.
+Confinement limits destinations to HOME/XDG roots and separately protects the private `susu` state directory, active repository worktree, and Git common administrative directory. A corresponding manifest entry cannot write into those roots. Other machine control paths remain outside this runtime-specific boundary, and public sources and manifest policy are still unauthenticated, so manifest provenance and destination review remain part of the trust boundary.
 
 ## Transaction, atomicity, and failure behavior
 
@@ -422,7 +410,7 @@ The source-first `add` ordering and manifest-first `rm` ordering favor orphaned 
 `apply` has a stronger preflight for repository structure and sensitive authentication than for destination I/O:
 
 - missing, oversized, symlinked, or non-regular sources are detected before destination mutation;
-- all applicable sensitive ciphertext is authenticated before destination mutation;
+- all sensitive ciphertext is authenticated before destination mutation;
 - public sources stay open on stable descriptors, but their bytes are streamed later, so a later read error remains possible; and
 - destination permissions, parent creation, staging writes, renames, and directory syncs occur one file at a time.
 
@@ -488,17 +476,17 @@ The implemented model has these deliberate or practical limits:
 - One XDG state home binds one active repository path at a time; the binding does not pin filesystem or Git identity.
 - Managed destinations are limited to `HOME` and `XDG_CONFIG_HOME`; arbitrary absolute destinations and other XDG base directories are not represented.
 - Existing entries cannot be refreshed through `add`; it is membership capture, not synchronization.
-- Restore overwrites applicable destinations without conflict detection against local contents, backups, or a command-wide rollback.
+- Restore overwrites managed destinations without conflict detection against local contents, backups, or a command-wide rollback.
 - Entries represent regular files only. Symlinks, special files, empty directories, and directory metadata are not preserved.
 - Recursive input and destination application reject canonical or physical overlap with the private state directory, active worktree, and Git common directory. The implementation does not perform a global reverse-inode search for arbitrary regular-file hard links into repository or Git trees; current destination replacement installs a new inode rather than writing through an existing hard link.
 - Darwin apply comparison deliberately rejects case- or canonically equivalent destination spellings even on a case-sensitive macOS volume. Linux comparison preserves spelling and does not emulate macOS behavior.
 - Public mode portability is limited to non-executable versus executable; sensitive destinations are always `0600`.
-- `add` reads one complete input file into memory. Sensitive `show` reads and decrypts one complete envelope in memory. `apply` retains all applicable sensitive plaintext through preflight.
+- `add` reads one complete input file into memory. Sensitive `show` reads and decrypts one complete envelope in memory. `apply` retains all sensitive plaintext through preflight.
 - Input files are limited to 512 MiB. `apply` sources and sensitive `show` sources are limited to 1 GiB as described above; public `show` has no explicit size cap.
 - Destination atomicity relies on same-directory staging. Sensitive plaintext can remain in a crash-residue staging file that requires manual cleanup; `apply` does not reserve or scavenge neighboring names matching its staging format.
 - New-source no-overwrite installation relies on same-directory hard links.
 - Advisory locking protects only cooperating local `susu` processes; it does not coordinate Git, manual edits, or remote machines.
-- Public content, logical paths, source paths, platform exclusions, and crypto metadata remain visible in the repository. Sensitive-content guarantees and their limits are covered in the [encryption and security model](security-model.md).
+- Public content, logical paths, source paths, and crypto metadata remain visible in the repository. Sensitive-content guarantees and their limits are covered in the [encryption and security model](security-model.md).
 
 ## Verification contract
 
@@ -507,7 +495,6 @@ Changes to supported behavior are complete only when the relevant automated test
 - `init` Git-root validation and machine-local repository binding;
 - HOME normalization, XDG config normalization, and fallback to `~/.config`;
 - public, sensitive, multiple-file, duplicate, and recursive `add` behavior, including built-in exclusions;
-- platform exclusions;
 - `rm`, `ls` and its `list` alias, public and sensitive `show`, and public and sensitive `apply`;
 - encryption/decryption round trips, wrong passwords, corrupted ciphertext, and invalid or unsupported formats;
 - paths containing spaces; and
@@ -515,7 +502,7 @@ Changes to supported behavior are complete only when the relevant automated test
 
 Tests must construct isolated temporary HOME, XDG, repository, and destination roots. They must never read from or modify the developer's real HOME or XDG directories. Fixtures must derive logical destinations from the configured lexical HOME/XDG spellings rather than from post-initialization canonical paths, because supported filesystems can expose aliases such as macOS `/tmp` and `/private/tmp` for the same root.
 
-The following path shapes are a maintained portability regression corpus, not an allowlist. Tests should exercise them according to the ordinary path, shell-expansion, sensitivity, recursion, and platform-exclusion rules; the implementation must not hardcode this list:
+The following path shapes are a maintained portability regression corpus, not an allowlist. Tests should exercise them according to the ordinary path, shell-expansion, sensitivity, and recursion rules; the implementation must not hardcode this list:
 
 ```text
 ~/.aws
@@ -543,4 +530,4 @@ ${XDG_CONFIG_HOME}/zed/settings.json
 ~/Library/Application Support/MTMR/items.json
 ```
 
-The implementation is done only when all repository commands work with their documented multiple-path, recursive, XDG, exclusion, sensitive-data, and restore semantics and completion generation works for every supported shell; sensitive repository storage contains ciphertext rather than plaintext; core behavior has meaningful automated coverage; the reference, design, and security documents match the implementation; root and per-command help are complete; and repository selection requires only the documented local binding created by `init`, with no hidden discovery or selection mechanism.
+The implementation is done only when all repository commands work with their documented multiple-path, recursive, XDG, built-in cache exclusion, sensitive-data, and restore semantics and completion generation works for every supported shell; sensitive repository storage contains ciphertext rather than plaintext; core behavior has meaningful automated coverage; the reference, design, and security documents match the implementation; root and per-command help are complete; and repository selection requires only the documented local binding created by `init`, with no hidden discovery or selection mechanism.

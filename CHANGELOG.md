@@ -34,7 +34,7 @@ Notable user-facing changes to `susu` are documented in this file. The README de
 
 ### Fixed
 
-- Prevented managed inputs and applicable `apply` destinations from overlapping the active private `susu` state directory, repository worktree, or Git common administrative directory.
+- Prevented managed inputs and `apply` destinations from overlapping the active private `susu` state directory, repository worktree, or Git common administrative directory.
 - Made repository locking and control-root protection share one canonical Git common directory, including linked worktrees and separate Git directories.
 - Preserved trailing whitespace when parsing Git worktree and common-directory paths.
 
@@ -46,7 +46,6 @@ Notable user-facing changes to `susu` are documented in this file. The README de
 - Management of public dotfiles as repository snapshots and sensitive dotfiles as authenticated ciphertext.
 - Password-protected repository master keys with per-file AES-256-GCM encryption.
 - Portable HOME and XDG logical paths for sharing one dotfiles repository across machines.
-- Explicit `darwin` and `linux` platform exclusions.
 - Recursive directory discovery with conservative symlink and special-file handling.
 - Preflighted, confined, atomic restoration of public and sensitive files.
 - Machine-local active-repository binding and repository-operation locking.

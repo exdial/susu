@@ -23,11 +23,11 @@ For entries marked `sensitive`, the implementation aims to:
 6. avoid persisting the password, password-derived key, or plaintext repository master key;
 7. limit passwords, keys, and decrypted file buffers to the command invocation that needs them, with best-effort in-place zeroization;
 8. confine managed source and destination operations beneath validated filesystem roots without following symlink components;
-9. reject multiple logical entries that identify one physical add candidate or one applicable destination under the selected platform's comparison model;
+9. reject multiple logical entries that identify one physical add candidate or one destination under the selected platform's comparison model;
 10. use atomic per-file installation or replacement so ordinary write failures do not expose partially written final files; and
 11. never log passwords or sensitive plaintext.
 
-Independently of entry sensitivity, the active private `susu` state directory, repository worktree, and Git common administrative directory are protected local control roots. `add` cannot capture exact, descendant, ancestor, canonical, physical, or case aliases of those roots, and opened-file identity checks additionally protect hard-linked local-state files. Applicable `apply` destinations cannot target any protected root or alias one another under the runtime comparison model. These goals concern `susu`'s own behavior. They do not make a compromised host, untrusted Git state, plaintext destination, or weak password safe.
+Independently of entry sensitivity, the active private `susu` state directory, repository worktree, and Git common administrative directory are protected local control roots. `add` cannot capture exact, descendant, ancestor, canonical, physical, or case aliases of those roots, and opened-file identity checks additionally protect hard-linked local-state files. `apply` destinations cannot target any protected root or alias one another under the runtime comparison model. These goals concern `susu`'s own behavior. They do not make a compromised host, untrusted Git state, plaintext destination, or weak password safe.
 
 The named plaintext staging file used by sensitive `apply` is an explicitly accepted residual risk in this security model. It preserves portable atomic final-file replacement, hard-link isolation, and leaf-symlink replacement, but abnormal termination or cleanup failure can leave recoverable plaintext beside the destination. Mode `0600`, exact-name ordinary cleanup, and manual residue handling reduce but do not eliminate that risk.
 
@@ -40,7 +40,7 @@ The named plaintext staging file used by sensitive `apply` is an explicitly acce
 | 32-byte repository master key | Directly encrypts every sensitive file in that repository; compromise exposes all such files | Only as authenticated ciphertext in `susu.json` |
 | Sensitive plaintext | The data being protected | Yes at the original source, applied destination, and transient or residual `apply` staging file; not in sensitive repository storage |
 | Encrypted files and crypto metadata | Non-secret cryptographic material, but essential recovery material and an offline password-guessing target | Yes |
-| Manifest paths and policy | Reveals managed names, directory shape, sensitivity flags, and platform exclusions | Yes, in plaintext |
+| Manifest paths and policy | Reveals managed names, directory shape, and sensitivity flags | Yes, in plaintext |
 | Public entries | Intentionally unencrypted content | Yes, in plaintext |
 | Local repository binding | Reveals the active repository's canonical local path | Yes, outside the repository; contains no key material |
 
@@ -54,8 +54,8 @@ The relevant trust boundaries are:
 | `/dev/tty` | Trusted for no-echo password entry. A compromised terminal, keylogger, or TTY owner remains able to capture input. |
 | `HOME` and `XDG_CONFIG_HOME` | Authorized plaintext roots. `apply` is expected to create usable plaintext files there, except beneath the runtime-specific protected control roots. |
 | Local `susu` state directory | Protected control root containing the active binding, local lock, and state staging files. Its finite file identities are also protected from hard-linked `add` aliases. |
-| Active repository worktree and Git common directory | Protected control roots containing portable snapshots, manifest state, Git metadata, locks, and staging files. Exact, descendant, ancestor, canonical, physical, and filesystem-resolved case aliases are rejected for `add` and applicable `apply`. Linked worktrees can have two disjoint protected roots. |
-| Filesystem-identity and destination validation timing | Input/discovery overlaps and initial add identity conflicts fail before password processing. After an optional `add` password callback, every new candidate is rechecked before any candidate content or repository source is written, command-wide before each descriptor read, and once more before manifest commit. `apply` checks the complete applicable destination set after platform filtering, after unlock, after source/authentication preflight, and immediately before each replacement; protected-root errors have priority over alias errors. |
+| Active repository worktree and Git common directory | Protected control roots containing portable snapshots, manifest state, Git metadata, locks, and staging files. Exact, descendant, ancestor, canonical, physical, and filesystem-resolved case aliases are rejected for `add` and `apply`. Linked worktrees can have two disjoint protected roots. |
+| Filesystem-identity and destination validation timing | Input/discovery overlaps and initial add identity conflicts fail before password processing. After an optional `add` password callback, every new candidate is rechecked before any candidate content or repository source is written, command-wide before each descriptor read, and once more before manifest commit. `apply` checks the complete destination set before unlock, after unlock, after source/authentication preflight, and immediately before each replacement; protected-root errors have priority over alias errors. |
 | Filesystem and random source | Expected to implement the requested Unix permission, descriptor, rename, link, sync, and cryptographic-randomness semantics correctly. |
 | Git transport, signing, review, and history | Outside `susu`; Git and the operator remain responsible for them. |
 
@@ -78,7 +78,7 @@ Under those assumptions:
 - repository possession permits offline password guessing but not direct recovery of the password or master key; and
 - replaying an older valid encrypted file at the **same** logical path, or replaying an older coherent repository snapshot, is not detected.
 
-Repository modification is not fully contained by file encryption. An attacker can alter unsigned manifest policy, remove entries, change platform exclusions, or provide attacker-chosen public entries. In particular, an untrusted manifest plus public source can direct `apply` to write attacker-controlled plaintext to representable locations within the permitted `HOME` or `XDG_CONFIG_HOME` roots, except the private `susu` state directory, active worktree, and Git common administrative directory. Applicable destinations already overlapping those roots are rejected before password prompting or repository-source access and are rechecked before mutation. Other local control files remain unprotected. Authenticate and review repository state before applying it.
+Repository modification is not fully contained by file encryption. An attacker can alter unsigned manifest policy, remove entries, or provide attacker-chosen public entries. In particular, an untrusted manifest plus public source can direct `apply` to write attacker-controlled plaintext to representable locations within the permitted `HOME` or `XDG_CONFIG_HOME` roots, except the private `susu` state directory, active worktree, and Git common administrative directory. Destinations already overlapping those roots are rejected before password prompting or repository-source access and are rechecked before mutation. Other local control files remain unprotected. Authenticate and review repository state before applying it.
 
 ## Explicit non-goals
 
@@ -200,7 +200,7 @@ UTF-8("susu:sensitive-file:v1") || 0x00 || UTF-8(logicalPath)
 
 For example, the logical path may be `~/.ssh/config` or `${XDG_CONFIG_HOME}/service/token`. The path is authenticated but not encrypted. It is not duplicated inside the encrypted-file envelope; the manifest supplies it during decryption.
 
-The NUL separator and distinct prefixes separate master-key wrapping from file encryption and prevent ambiguous concatenation. The file AAD does **not** include a repository identifier, Git commit, source filename, platform exclusions, or monotonic counter. Consequently:
+The NUL separator and distinct prefixes separate master-key wrapping from file encryption and prevent ambiguous concatenation. The file AAD does **not** include a repository identifier, Git commit, source filename, or monotonic counter. Consequently:
 
 - ciphertext substitution between different logical paths fails;
 - same-path replay succeeds if the replayed ciphertext is otherwise valid;
@@ -297,11 +297,11 @@ After structural validation, AES-GCM authentication must succeed with the reposi
 | `ls` (`list` alias) | No prompt | Reads manifest metadata only; it does not read or decrypt file contents. |
 | public `show` | No prompt | Streams the repository plaintext source to stdout. |
 | sensitive `show` | One unlock prompt | Reads the envelope, authenticates and decrypts it in memory, then writes plaintext to stdout. It does not modify the destination or create a plaintext file. |
-| `apply` with no applicable sensitive entry | No prompt | Streams public sources through same-directory staging files to destinations. |
-| `apply` with applicable sensitive entries | One unlock prompt for the invocation | Authenticates and decrypts all applicable sensitive files in memory during preflight, then writes each through a same-directory plaintext staging file to its destination. |
+| `apply` with no sensitive entry | No prompt | Streams public sources through same-directory staging files to destinations. |
+| `apply` with sensitive entries | One unlock prompt for the invocation | Authenticates and decrypts all sensitive files in memory during preflight, then writes each through a same-directory plaintext staging file to its destination. |
 | `rm` | No prompt | Removes the manifest entry and unlinks its repository source after the manifest transition; it does not decrypt or remove the destination. |
 
-Platform exclusions are evaluated before deciding whether `apply` needs a password. After filtering, every applicable destination is checked against the private state directory, active worktree, and Git common directory and compared with all other applicable destinations. An existing protected overlap or alias conflict fails before repository-source access or password prompting. The complete set is checked again after unlock, after source/authentication preflight, and immediately before every replacement. If every sensitive entry is excluded on the running platform, no unlock occurs.
+`apply` processes all managed entries. Every destination is checked against the private state directory, active worktree, and Git common directory and compared with all other destinations. An existing protected overlap or alias conflict fails before repository-source access or password prompting. The complete set is checked again after unlock, after source/authentication preflight, and immediately before every replacement.
 
 ### `show`
 
@@ -313,14 +313,13 @@ Sensitive `show` completes envelope parsing and GCM authentication before sendin
 
 Before changing any destination, `apply`:
 
-1. filters platform-excluded entries;
-2. resolves every applicable logical destination, rejects canonical or physical overlap with the private state directory, active worktree, or Git common directory, and rejects destination aliases or ancestor conflicts;
-3. unlocks once if needed and immediately repeats the complete destination check;
-4. opens every applicable repository source as a regular file;
-5. checks repository-source size limits;
-6. fully authenticates and decrypts every applicable sensitive envelope;
-7. rechecks every applicable destination against protected roots and every other destination after source preflight; and
-8. repeats the complete check immediately before each staging write.
+1. resolves every logical destination, rejects canonical or physical overlap with the private state directory, active worktree, or Git common directory, and rejects destination aliases or ancestor conflicts;
+2. unlocks once if needed and immediately repeats the complete destination check;
+3. opens every repository source as a regular file;
+4. checks repository-source size limits;
+5. fully authenticates and decrypts every sensitive envelope;
+6. rechecks every destination against protected roots and every other destination after source preflight; and
+7. repeats the complete check immediately before each staging write.
 
 This prevents a wrong password, corrupted sensitive source, or detected destination alias from causing an unpreflighted write. Public source content is not cryptographically authenticated. Protected-root checks run before alias comparison at each checkpoint.
 
@@ -353,7 +352,7 @@ A command requests one password sequence at most:
 - first encryption initialization requests a password and confirmation;
 - a later sensitive `add` requests one password;
 - sensitive `show` requests one password; and
-- `apply` requests one password for all applicable sensitive files.
+- `apply` requests one password for all sensitive files.
 
 There is no password cache, daemon, agent, keychain integration, secret-service integration, or persisted unlocked key. Separate CLI invocations unlock independently.
 
@@ -417,7 +416,7 @@ Sensitive sources are set to mode `0600`; public sources are normalized to `0644
 
 `susu.json` is written as a mode-`0644` same-directory temporary file, synced, atomically renamed into place, and followed by a repository-directory sync. If the rename succeeds but directory sync fails, the operation reports that the manifest was committed with uncertain durability and does not roll back newly installed sources.
 
-The local binding contains only the canonical repository path. Its directory is set to `0700`, its state and lock files to `0600`, and state replacement uses a synced same-directory temporary plus rename and directory sync. `init` requires the complete state directory to remain canonically and physically disjoint from both the active worktree and Git common directory, including filesystem-resolved case aliases. A symlink used as the state file is rejected on load. All three control roots are excluded from managed inputs and applicable destinations. A legacy manifest entry targeting one fails before unlock or source access when the overlap already exists; `ls`, `show`, and `rm` remain available so the entry can be inspected and removed.
+The local binding contains only the canonical repository path. Its directory is set to `0700`, its state and lock files to `0600`, and state replacement uses a synced same-directory temporary plus rename and directory sync. `init` requires the complete state directory to remain canonically and physically disjoint from both the active worktree and Git common directory, including filesystem-resolved case aliases. A symlink used as the state file is rejected on load. All three control roots are excluded from managed inputs and destinations. A legacy manifest entry targeting one fails before unlock or source access when the overlap already exists; `ls`, `show`, and `rm` remain available so the entry can be inspected and removed.
 
 Source and destination content operations have the strongest descriptor-relative no-follow guarantees. Some top-level repository, manifest, and state setup or loading steps necessarily use pathname-based operating-system calls. Protected directory identities are captured and revalidated during `add` and `apply`, but an attacker able to rewrite filesystem namespaces concurrently as the same user remains outside the threat model.
 
@@ -449,11 +448,11 @@ Security-sensitive failures are closed rather than downgraded:
 | Wrong repository master key | GCM authentication fails |
 | Different logical path | AAD mismatch causes GCM authentication failure |
 | Same-path older valid ciphertext | Accepted; no rollback state exists |
-| Corrupt applicable sensitive source during `apply` | No destination is changed because sensitive authentication occurs during preflight |
+| Corrupt sensitive source during `apply` | No destination is changed because sensitive authentication occurs during preflight |
 | Destination failure after preflight | Earlier per-file replacements may remain committed; the failing staging file is removed on ordinary error |
 | Directory sync failure after final rename | Reported as an error with the destination already replaced and durability uncertain |
 
-Authentication establishes that a wrapped key or sensitive envelope was produced by a holder of the relevant key for the supplied AAD. It does not establish which Git commit should be trusted, whether a manifest entry should exist, whether platform policy is correct, or whether a public source is authentic.
+Authentication establishes that a wrapped key or sensitive envelope was produced by a holder of the relevant key for the supplied AAD. It does not establish which Git commit should be trusted, whether a manifest entry should exist, or whether a public source is authentic.
 
 ## Security regression obligations
 
@@ -474,7 +473,7 @@ Security-sensitive changes must retain automated coverage for:
 | Each filesystem input read by `add` | 512 MiB (`536870912` bytes) |
 | Each repository source preflighted by `apply` | 1 GiB (`1073741824` bytes) |
 | Sensitive repository source read by `show` | 1 GiB |
-| Aggregate applicable sensitive plaintext retained by `apply` | 1 GiB |
+| Aggregate sensitive plaintext retained by `apply` | 1 GiB |
 | Accepted Argon2id memory | At most 256 MiB |
 | Accepted Argon2id time | At most 10 passes |
 | Accepted Argon2id parallelism | At most 16 lanes |
@@ -482,7 +481,7 @@ Security-sensitive changes must retain automated coverage for:
 Important consequences and remaining denial-of-service exposure include:
 
 - `add` buffers each input file in memory. Sensitive encryption additionally allocates ciphertext and Base64 JSON buffers.
-- Sensitive `show` buffers the serialized envelope and plaintext. Sensitive `apply` retains all decrypted applicable plaintext until preflight completes or each file is committed.
+- Sensitive `show` buffers the serialized envelope and plaintext. Sensitive `apply` retains all decrypted plaintext until preflight completes or each file is committed.
 - Public `apply` keeps validated source descriptors open and streams their bytes; public `show` streams without an explicit file-size cap.
 - There is no explicit command-level limit on the number of input files, directory-walk entries, total public bytes, or aggregate bytes added. The 16 MiB manifest cap eventually bounds serialized entry metadata, not traversal work already performed.
 - JSON/Base64 parsing and AEAD operations consume additional memory beyond the nominal file limits.
@@ -497,7 +496,6 @@ Encryption does not hide:
 
 - every logical path and deterministic repository source path;
 - which entries are marked sensitive;
-- platform exclusions;
 - entry counts and directory shape;
 - manifest, crypto, and encrypted-envelope format versions;
 - KDF algorithm, work factors, salt, wrapping algorithm, wrapped key, and nonces;
@@ -557,5 +555,5 @@ The repository master key is the compromise boundary. If it is disclosed, every 
 11. **Avoid concurrent external repository mutation.** Do not run checkout, merge, cleanup, or scripts that rewrite `susu.json`, `public/`, or `encrypted/` while a `susu` command is active.
 12. **Scope recursive adds narrowly.** An input containing the private state directory, active worktree, or Git common directory is rejected. Still avoid broad ancestors containing unrelated staging files or other unprotected control data; there is no general automatic ignore list.
 13. **Use a trusted Git executable and configuration.** Ensure `git` from `PATH` is the expected binary and review global/system Git configuration. `susu` ignores inherited repository-local and discovery variables for validation, including `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_COMMON_DIR`.
-14. **Resolve reported destination aliases instead of bypassing them.** `apply` rejects case- or canonically equivalent Darwin destinations before source access and repeats the check during the invocation. Remove or exclude the unintended logical entry; do not hand-edit encrypted logical paths because they are authenticated AAD. Darwin comparison is intentionally conservative on case-sensitive volumes, while Linux preserves spelling.
+14. **Resolve reported destination aliases instead of bypassing them.** `apply` rejects case- or canonically equivalent Darwin destinations before source access and repeats the check during the invocation. Remove the unintended logical entry; do not hand-edit encrypted logical paths because they are authenticated AAD. Darwin comparison is intentionally conservative on case-sensitive volumes, while Linux preserves spelling.
 15. **Do not hand-edit cryptographic metadata.** Unsupported versions, algorithms, lengths, or parameters fail closed, while accepted but inconsistent edits can make the repository permanently undecryptable.
