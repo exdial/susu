@@ -38,10 +38,9 @@ var (
 
 // Entry describes one individually managed file.
 type Entry struct {
-	Path             string   `json:"path"`
-	Source           string   `json:"source"`
-	Sensitive        bool     `json:"sensitive,omitempty"`
-	ExcludePlatforms []string `json:"excludePlatforms,omitempty"`
+	Path      string `json:"path"`
+	Source    string `json:"source"`
+	Sensitive bool   `json:"sensitive,omitempty"`
 }
 
 // Manifest is the versioned portable state committed to the dotfiles repository.
@@ -142,8 +141,8 @@ func Save(filename string, value Manifest) error {
 	return nil
 }
 
-// Validate checks the manifest version, entries, platform values, crypto
-// metadata, and deterministic storage mapping.
+// Validate checks the manifest version, entries, crypto metadata, and
+// deterministic storage mapping.
 func Validate(value Manifest) error {
 	if value.Version != CurrentVersion {
 		return fmt.Errorf("%w: got %d, supported version is %d", ErrUnsupportedVersion, value.Version, CurrentVersion)
@@ -236,16 +235,6 @@ func validateEntry(entry Entry) error {
 	}
 	if entry.Source != expectedSource {
 		return fmt.Errorf("source %q does not match deterministic source %q", entry.Source, expectedSource)
-	}
-	seenPlatforms := make(map[string]struct{}, len(entry.ExcludePlatforms))
-	for _, platform := range entry.ExcludePlatforms {
-		if platform != "darwin" && platform != "linux" {
-			return fmt.Errorf("unsupported platform value %q", platform)
-		}
-		if _, exists := seenPlatforms[platform]; exists {
-			return fmt.Errorf("duplicate excluded platform %q", platform)
-		}
-		seenPlatforms[platform] = struct{}{}
 	}
 	return nil
 }
