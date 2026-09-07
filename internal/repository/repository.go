@@ -189,44 +189,6 @@ func (r *Repository) SourcePath(source string) (string, error) {
 	return absolute, nil
 }
 
-// ExistingSource returns a regular, non-symlink repository file. Every parent
-// below the repository root must also be a real directory rather than a symlink.
-func (r *Repository) ExistingSource(source string) (string, error) {
-	absolute, err := r.SourcePath(source)
-	if err != nil {
-		return "", err
-	}
-	if err := r.validateParentDirectories(filepath.Dir(absolute), false, 0); err != nil {
-		return "", err
-	}
-	info, err := os.Lstat(absolute)
-	if err != nil {
-		return "", fmt.Errorf("open repository source %q: %w", source, err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("%w: source %q is not a regular file", ErrUnsafeSource, source)
-	}
-	return absolute, nil
-}
-
-// NewSource prepares real parent directories for a new stored file and refuses
-// to return a target that already exists.
-func (r *Repository) NewSource(source string, directoryMode os.FileMode) (string, error) {
-	absolute, err := r.SourcePath(source)
-	if err != nil {
-		return "", err
-	}
-	if err := r.validateParentDirectories(filepath.Dir(absolute), true, directoryMode); err != nil {
-		return "", err
-	}
-	if _, err := os.Lstat(absolute); err == nil {
-		return "", fmt.Errorf("%w: %q", ErrSourceExists, source)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("inspect repository source %q: %w", source, err)
-	}
-	return absolute, nil
-}
-
 // OpenSource opens one regular stored file through a traversal-resistant root.
 // Symlinks cannot escape the repository even if path components change while
 // the operation is in progress.
@@ -372,34 +334,6 @@ func (r *Repository) checkStorageDirectories() error {
 		}
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("%w: storage path %q is not a real directory", ErrUnsafeSource, location)
-		}
-	}
-	return nil
-}
-
-func (r *Repository) validateParentDirectories(parent string, create bool, mode os.FileMode) error {
-	relative, err := filepath.Rel(r.Root, parent)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("%w: parent %q escapes repository", ErrUnsafeSource, parent)
-	}
-	current := r.Root
-	if relative == "." {
-		return nil
-	}
-	for _, component := range strings.Split(relative, string(filepath.Separator)) {
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if errors.Is(err, os.ErrNotExist) && create {
-			if err := os.Mkdir(current, mode); err != nil {
-				return fmt.Errorf("create repository directory %q: %w", current, err)
-			}
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("inspect repository directory %q: %w", current, err)
-		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%w: repository parent %q is not a real directory", ErrUnsafeSource, current)
 		}
 	}
 	return nil

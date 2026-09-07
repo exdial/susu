@@ -638,47 +638,62 @@ func TestSourcesRejectSymlinks(t *testing.T) {
 	}
 
 	t.Run("existing source through symlink parent", func(t *testing.T) {
-		got, err := repository.ExistingSource("public/linked-directory/secret")
-		if !errors.Is(err, ErrUnsafeSource) {
-			t.Fatalf("ExistingSource() error = %v, want ErrUnsafeSource", err)
+		file, err := repository.OpenSource("public/linked-directory/secret")
+		if file != nil {
+			_ = file.Close()
+			t.Fatal("OpenSource() returned a file through a symlink parent")
 		}
-		if got != "" {
-			t.Fatalf("ExistingSource() = %q after error, want empty path", got)
+		if err == nil {
+			t.Fatal("OpenSource() accepted a symlink parent")
 		}
 	})
 
 	t.Run("new source through symlink parent", func(t *testing.T) {
-		got, err := repository.NewSource("public/linked-directory/new", 0o700)
-		if !errors.Is(err, ErrUnsafeSource) {
-			t.Fatalf("NewSource() error = %v, want ErrUnsafeSource", err)
-		}
-		if got != "" {
-			t.Fatalf("NewSource() = %q after error, want empty path", got)
+		if err := repository.WriteNewSource("public/linked-directory/new", []byte("must not be written\n"), 0o600); err == nil {
+			t.Fatal("WriteNewSource() accepted a symlink parent")
 		}
 		if _, statErr := os.Lstat(filepath.Join(outside, "new")); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("NewSource() escaped through a symlink: stat error = %v", statErr)
+			t.Fatalf("WriteNewSource() escaped through a symlink: stat error = %v", statErr)
 		}
 	})
 
 	t.Run("existing symlink leaf", func(t *testing.T) {
-		got, err := repository.ExistingSource("public/linked-file")
-		if !errors.Is(err, ErrUnsafeSource) {
-			t.Fatalf("ExistingSource() error = %v, want ErrUnsafeSource", err)
+		file, err := repository.OpenSource("public/linked-file")
+		if file != nil {
+			_ = file.Close()
+			t.Fatal("OpenSource() returned a file through a symlink leaf")
 		}
-		if got != "" {
-			t.Fatalf("ExistingSource() = %q after error, want empty path", got)
+		if err == nil {
+			t.Fatal("OpenSource() accepted a symlink leaf")
 		}
 	})
 
 	t.Run("new symlink leaf", func(t *testing.T) {
-		got, err := repository.NewSource("public/linked-file", 0o700)
+		err := repository.WriteNewSource("public/linked-file", []byte("must not replace the target\n"), 0o600)
 		if !errors.Is(err, ErrSourceExists) {
-			t.Fatalf("NewSource() error = %v, want ErrSourceExists", err)
-		}
-		if got != "" {
-			t.Fatalf("NewSource() = %q after error, want empty path", got)
+			t.Fatalf("WriteNewSource() error = %v, want ErrSourceExists", err)
 		}
 	})
+
+	contents, err := os.ReadFile(outsideSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "do not follow\n" {
+		t.Fatalf("outside target changed: contents = %q", contents)
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "secret" {
+		t.Fatalf("outside directory changed: entries = %v", entries)
+	}
+	for link, wantTarget := range map[string]string{parentLink: outside, leafLink: outsideSecret} {
+		if target, err := os.Readlink(link); err != nil || target != wantTarget {
+			t.Fatalf("symlink %q changed: target = %q, error = %v, want %q", link, target, err, wantTarget)
+		}
+	}
 }
 
 func requireGit(t *testing.T) string {
