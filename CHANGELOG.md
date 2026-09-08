@@ -6,11 +6,13 @@ Notable user-facing changes to `susu` are documented in this file. The README de
 
 ### Added
 
+- Added snapshot refreshes for exact already-managed logical paths through ordinary `susu add`, without an update flag, and a distinct `updated` CLI result group.
 - Added `susu completion <shell>` generation for Bash and Zsh.
 - Added regression coverage for controlling-TTY password input, fail-closed crypto metadata validation, and atomic replacement failure semantics.
 
 ### Changed
 
+- Changed recursive `add` to refresh discovered managed files alongside new additions without removing missing local entries. Existing entries retain their source and sensitivity regardless of `--sensitive`; sensitive updates unlock once per invocation, while different-logical-path aliases remain `already managed` skips. Updates commit atomically per file and remain reported after later failures; additions retain new-source-first, manifest-last rollback semantics. Update-only invocations do not rewrite the manifest.
 - Made no-argument invocation a successful contextual overview: uninitialized installations receive short onboarding, while initialized installations show the active repository and managed file count.
 - Simplified root and command-specific help, keeping command signatures out of the root command list and retaining `list` only as a documented alias of `ls`.
 - Displayed managed XDG config paths as `~/.config/...` throughout the CLI while retaining `${XDG_CONFIG_HOME}/...` identities in `susu.json`.
