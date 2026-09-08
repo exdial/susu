@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"susu/internal/manifest"
+	"github.com/exdial/susu/internal/manifest"
 )
 
 func TestInitializeRejectsInvalidPaths(t *testing.T) {

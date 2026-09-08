@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"susu/internal/cryptox"
+	"github.com/exdial/susu/internal/cryptox"
 )
 
 func TestEmptyAndNewManifestRoundTrip(t *testing.T) {

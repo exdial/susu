@@ -11,12 +11,12 @@ import (
 	"sort"
 	"strings"
 
-	"susu/internal/cryptox"
-	"susu/internal/manifest"
-	"susu/internal/paths"
-	"susu/internal/repository"
-	"susu/internal/safefs"
-	"susu/internal/state"
+	"github.com/exdial/susu/internal/cryptox"
+	"github.com/exdial/susu/internal/manifest"
+	"github.com/exdial/susu/internal/paths"
+	"github.com/exdial/susu/internal/repository"
+	"github.com/exdial/susu/internal/safefs"
+	"github.com/exdial/susu/internal/state"
 )
 
 const (

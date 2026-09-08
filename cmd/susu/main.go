@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"susu/internal/cli"
+	"github.com/exdial/susu/internal/cli"
 )
 
 func main() {

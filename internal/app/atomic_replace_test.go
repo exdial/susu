@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"susu/internal/safefs"
+	"github.com/exdial/susu/internal/safefs"
 )
 
 const (
