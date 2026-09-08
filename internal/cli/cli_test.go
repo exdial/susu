@@ -12,6 +12,7 @@ import (
 	"susu/internal/app"
 	"susu/internal/cli"
 	"susu/internal/paths"
+	"susu/internal/repository"
 	"susu/internal/state"
 )
 
@@ -30,7 +31,7 @@ func TestHelp(t *testing.T) {
 			want: []string{
 				"susu manages portable public and encrypted dotfiles.",
 				"Usage:\n  susu <command> [arguments]",
-				"Commands:\n  init        initialize susu in an existing Git repository\n  add         start managing files or directories\n  rm          stop managing files\n  ls          list managed files\n  show        print a stored file\n  apply       apply managed files to this machine\n  completion  generate shell completion script",
+				"Commands:\n  init        initialize susu in an existing Git repository\n  add         add or update file snapshots\n  rm          stop managing files\n  ls          list managed files\n  show        print a stored file\n  apply       apply managed files to this machine\n  completion  generate shell completion script",
 				"Run `susu <command> --help` for command-specific help.",
 				"Git synchronization stays explicit.",
 				"Use Git normally to commit, pull, and push changes.",
@@ -57,7 +58,9 @@ func TestHelp(t *testing.T) {
 			name:      "add",
 			arguments: []string{"add", "--help"},
 			want: []string{
-				"Add files or directories to susu.",
+				"Add or update file snapshots in susu.",
+				"Existing entries keep their public or sensitive classification.",
+				"earlier updates remain if a later operation fails.",
 				"Usage:\n  susu add [options] <path...>",
 				"--sensitive",
 				"Examples:",
@@ -442,8 +445,15 @@ func TestPublicCLIWorkflow(t *testing.T) {
 	if got := runSuccessfully(t, fixture, "add", xdgDestination); got != "added ~/.config/argocd/config.yaml\n" {
 		t.Fatalf("XDG add stdout = %q", got)
 	}
-	if got := runSuccessfully(t, fixture, "add", xdgDestination); got != "already managed ~/.config/argocd/config.yaml\n" {
-		t.Fatalf("duplicate XDG add stdout = %q", got)
+	updatedContents := []byte("current-context: staging\n")
+	if err := os.WriteFile(xdgDestination, updatedContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := runSuccessfully(t, fixture, "add", xdgDestination); got != "updated ~/.config/argocd/config.yaml\n" {
+		t.Fatalf("XDG update stdout = %q", got)
+	}
+	if got := runSuccessfully(t, fixture, "show", xdgDestination); got != string(updatedContents) {
+		t.Fatalf("show updated snapshot = %q, want %q", got, updatedContents)
 	}
 	if got := runSuccessfully(t, fixture, "add", xdgSettingsDestination); got != "added ~/.config/argocd/settings.yaml\n" {
 		t.Fatalf("XDG settings add stdout = %q", got)
@@ -480,6 +490,57 @@ func TestPublicCLIWorkflow(t *testing.T) {
 
 	if fixture.passwordCalls != 0 {
 		t.Fatalf("public workflow called the password provider %d times", fixture.passwordCalls)
+	}
+}
+
+func TestAddReportsCommittedUpdateWhenLaterAdditionFails(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is unavailable")
+	}
+	fixture := newCLIFixture(t)
+	isolateEnvironment(t, fixture)
+	repositoryPath := filepath.Join(fixture.root, "repository")
+	command := exec.Command(gitPath, "init", "--quiet", repositoryPath)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	runSuccessfully(t, fixture, "init", repositoryPath)
+	existing := filepath.Join(fixture.home, "a-existing")
+	fresh := filepath.Join(fixture.home, "b-new")
+	collision := filepath.Join(fixture.home, "z-collision")
+	if err := os.WriteFile(existing, []byte("old snapshot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runSuccessfully(t, fixture, "add", existing)
+	for _, filename := range []string{existing, fresh, collision} {
+		if err := os.WriteFile(filename, []byte("new snapshot"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orphan := filepath.Join(repositoryPath, "public", "z-collision")
+	if err := os.WriteFile(orphan, []byte("unmanaged sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := fixture.run("add", collision, fresh, existing)
+	if !errors.Is(err, repository.ErrSourceExists) {
+		t.Fatalf("add error = %v, want ErrSourceExists", err)
+	}
+	if stdout != "updated ~/a-existing\n" || stderr != "" {
+		t.Fatalf("add output = stdout %q, stderr %q; want only the committed update", stdout, stderr)
+	}
+	if got := runSuccessfully(t, fixture, "show", existing); got != "new snapshot" {
+		t.Fatalf("updated snapshot = %q", got)
+	}
+	if got := runSuccessfully(t, fixture, "ls"); got != "~/a-existing\n" {
+		t.Fatalf("entries after failed add = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(repositoryPath, "public", "b-new")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("new source was not rolled back: %v", err)
+	}
+	if contents, err := os.ReadFile(orphan); err != nil || string(contents) != "unmanaged sentinel" {
+		t.Fatalf("orphan changed: %q, %v", contents, err)
 	}
 }
 

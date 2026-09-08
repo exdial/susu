@@ -155,13 +155,17 @@ Examples:
 }
 
 func (c *CLI) runAdd(arguments []string) error {
-	flags := c.flagSet("add", `Add files or directories to susu.
+	flags := c.flagSet("add", `Add or update file snapshots in susu.
 
 Usage:
   susu add [options] <path...>
 
 Options:
   --sensitive  encrypt new files with the repository master key
+
+Existing entries keep their public or sensitive classification.
+Directories add new files and update managed files without removing missing ones.
+Updates are atomic per file; earlier updates remain if a later operation fails.
 
 Examples:
   susu add ~/.gitconfig
@@ -184,6 +188,11 @@ Examples:
 	for _, logical := range result.Added {
 		if _, err := fmt.Fprintf(c.stdout, "added %s\n", userFacingText(logical)); err != nil {
 			return err
+		}
+	}
+	for _, logical := range result.Updated {
+		if _, writeErr := fmt.Fprintf(c.stdout, "updated %s\n", userFacingText(logical)); writeErr != nil {
+			return writeErr
 		}
 	}
 	for _, logical := range result.AlreadyManaged {
@@ -343,7 +352,7 @@ Usage:
 
 Commands:
   init        initialize susu in an existing Git repository
-  add         start managing files or directories
+  add         add or update file snapshots
   rm          stop managing files
   ls          list managed files
   show        print a stored file

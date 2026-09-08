@@ -94,7 +94,7 @@ func TestAddRollsBackSourcesWhenCandidateBecomesAliasBeforeRead(t *testing.T) {
 			if !errors.Is(err, ErrDestinationConflict) {
 				t.Fatalf("addWithHooks() error = %v, want ErrDestinationConflict", err)
 			}
-			if len(result.Added) != 0 || len(result.AlreadyManaged) != 0 {
+			if len(result.Added) != 0 || len(result.Updated) != 0 || len(result.AlreadyManaged) != 0 {
 				t.Fatalf("addWithHooks() result = %+v, want empty result", result)
 			}
 
