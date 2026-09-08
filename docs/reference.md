@@ -47,10 +47,10 @@ To build and install the binary with Go:
 make install
 ```
 
-When using the pinned mise toolchain, run `mise exec -- make install` instead. The target uses `go install`, which writes `susu` to `GOBIN` or, when `GOBIN` is unset, to the `bin` directory under `go env GOPATH`. To install into `$HOME/.local/bin` explicitly:
+When using the pinned mise toolchain, run `mise exec -- make install` instead. The target uses `go install`, which writes `susu` to `GOBIN` or, when `GOBIN` is unset, to the `bin` directory under `go env GOPATH`. To install into `~/.local/bin` explicitly:
 
 ```bash
-GOBIN="$HOME/.local/bin" make install
+GOBIN=~/.local/bin make install
 ```
 
 Ensure the selected binary directory is on `PATH`. Release maintainers should follow the [release procedure](releasing.md).
@@ -60,20 +60,20 @@ Ensure the selected binary directory is on `PATH`. Release maintainers should fo
 The repository passed to `susu init` must already be the root of a Git repository. This example creates one, adds public and sensitive files, and then commits the result with Git:
 
 ```bash
-mkdir -p "$HOME/src"
-git init "$HOME/src/dotfiles"
+mkdir -p ~/src
+git init ~/src/dotfiles
 
-susu init "$HOME/src/dotfiles"
+susu init ~/src/dotfiles
 
-susu add "$HOME/.zshrc"
-susu add "$HOME/.gitconfig" "$HOME/.vimrc"
-susu add --sensitive "$HOME/.kube/config"
+susu add ~/.zshrc
+susu add ~/.gitconfig ~/.vimrc
+susu add --sensitive ~/.kube/config
 
 susu ls
 
-git -C "$HOME/src/dotfiles" status --short
-git -C "$HOME/src/dotfiles" add susu.json public encrypted
-git -C "$HOME/src/dotfiles" commit -m "Manage dotfiles with susu"
+git -C ~/src/dotfiles status --short
+git -C ~/src/dotfiles add susu.json public encrypted
+git -C ~/src/dotfiles commit -m "Manage dotfiles with susu"
 ```
 
 The first operation that needs sensitive storage asks for a repository password and confirmation. The password is not requested by `init` and is never stored.
@@ -81,9 +81,9 @@ The first operation that needs sensitive storage asks for a repository password 
 On another machine, let Git retrieve the repository and let `susu` restore the files:
 
 ```bash
-git clone <repository-url> "$HOME/src/dotfiles"
+git clone <repository-url> ~/src/dotfiles
 
-susu init "$HOME/src/dotfiles"
+susu init ~/src/dotfiles
 susu ls
 susu apply
 ```
@@ -146,7 +146,7 @@ An omitted, extra, or unsupported shell is an error. Completion generation does 
 ### `susu init`
 
 ```bash
-susu init "$HOME/src/dotfiles"
+susu init ~/src/dotfiles
 ```
 
 `init`:
@@ -168,21 +168,21 @@ The binding is machine-local; it is not written into the dotfiles repository. Ru
 Add one or more files:
 
 ```bash
-susu add "$HOME/.zshrc"
-susu add "$HOME/.gitconfig" "$HOME/.vimrc"
+susu add ~/.zshrc
+susu add ~/.gitconfig ~/.vimrc
 ```
 
 Add a directory recursively:
 
 ```bash
-susu add "$HOME/.vim"
+susu add ~/.vim
 ```
 
 A directory is expanded into one manifest entry per discovered file. The directory itself is not stored as an opaque entry.
 
 Ordinary `add` **captures new files and updates exact managed snapshots**, with no update flag. For each new file it resolves the path, derives a portable logical destination, copies or encrypts its current contents into the repository, and adds an entry to `susu.json`. For an exact already-managed logical path, it replaces the stored snapshot with the current local contents while preserving the existing entry, including its source path and sensitivity, regardless of `--sensitive`. Recursive adds refresh discovered managed regular files and add new ones; they do not remove manifest entries whose local files are missing.
 
-For example, after editing a managed `.zshrc`, run `susu add "$HOME/.zshrc"` again to update its snapshot. An existing update source in the repository must be present and openable as a regular file without following symlinks; a missing, symlinked, or special-file source is an error, not repaired by `add`. For a new entry, any existing unreferenced file at its deterministic source path is a collision and is never overwritten.
+For example, after editing a managed `.zshrc`, run `susu add ~/.zshrc` again to update its snapshot. An existing update source in the repository must be present and openable as a regular file without following symlinks; a missing, symlinked, or special-file source is an error, not repaired by `add`. For a new entry, any existing unreferenced file at its deterministic source path is a collision and is never overwritten.
 
 Updates use atomic per-file replacement, without backups or a global transaction. If a later read, validation, write, or manifest operation fails, updates whose rename already committed remain in place and are reported as `Updated`, including a replacement followed by a directory-sync error (durability is uncertain). New sources are installed before the manifest is saved. If the manifest has not committed, newly created sources are rolled back on a best-effort basis; committed updates are not. If the manifest rename committed but a later sync fails, additions remain and are reported as `Added`. An update-only invocation does not rewrite `susu.json`. Crashes or failed cleanup can leave unreferenced sources or staging files for manual inspection.
 
@@ -233,10 +233,10 @@ The shell normally expands `~` and wildcard patterns before `susu` receives its 
 susu add ~/.bashrc.*
 ```
 
-The shell decides which matching paths are passed. Quote paths containing spaces:
+The shell decides which matching paths are passed. Quote path components containing spaces, leaving the leading `~` unquoted so the shell can expand it:
 
 ```bash
-susu add "$HOME/Library/Application Support/MTMR/items.json"
+susu add ~/Library/"Application Support"/MTMR/items.json
 ```
 
 ### Sensitive files: `--sensitive`
@@ -244,8 +244,8 @@ susu add "$HOME/Library/Application Support/MTMR/items.json"
 Mark sensitive inputs explicitly:
 
 ```bash
-susu add --sensitive "$HOME/.kube/config"
-susu add --sensitive "$HOME/.ssh"
+susu add --sensitive ~/.kube/config
+susu add --sensitive ~/.ssh
 ```
 
 `--sensitive` applies only to newly managed entries, including newly discovered files in a directory. It does not convert existing public entries to encrypted storage or change existing sensitive entries. Updating an existing sensitive entry requires one unlock password even when `--sensitive` is omitted. An invocation mixing additions and updates shares that one unlock; initialization with password confirmation occurs only when there is a new sensitive entry and no repository crypto metadata. During `add`, sensitive plaintext is never copied into repository storage or a plaintext repository temporary file. The only repository copy is ciphertext under `encrypted/`. Destination staging used later by `apply` is described below.
@@ -259,8 +259,8 @@ See the [encryption and security model](security-model.md) for the encryption de
 Stop managing one or more files:
 
 ```bash
-susu rm "$HOME/.zshrc"
-susu rm "$HOME/.gitconfig" "$HOME/.vimrc"
+susu rm ~/.zshrc
+susu rm ~/.gitconfig ~/.vimrc
 ```
 
 `rm` removes each matching entry from `susu.json` and deletes its stored `public/...` or `encrypted/...enc` repository file. It does **not** delete the original destination from your home or XDG directory.
@@ -289,8 +289,8 @@ It does not expose cryptographic implementation details.
 Print one stored entry to standard output:
 
 ```bash
-susu show "$HOME/.gitconfig"
-susu show "$HOME/.kube/config"
+susu show ~/.gitconfig
+susu show ~/.kube/config
 ```
 
 For a public entry, `show` reads the repository copy. For a sensitive entry, it prompts for the repository password, authenticates and decrypts the ciphertext in memory, and writes plaintext to stdout. It does not modify the destination, invoke `apply`, create a plaintext temporary file, or leave a decrypted repository copy.
@@ -412,20 +412,20 @@ When sensitive storage is initialized, `susu.json` also carries versioned KDF an
 A safe repository workflow keeps encryption and Git as separate, visible steps:
 
 ```bash
-susu add --sensitive "$HOME/.kube/config"
+susu add --sensitive ~/.kube/config
 
 susu ls
-git -C "$HOME/src/dotfiles" status --short
-git -C "$HOME/src/dotfiles" add susu.json encrypted
-git -C "$HOME/src/dotfiles" commit -m "Manage encrypted kube config"
-git -C "$HOME/src/dotfiles" push
+git -C ~/src/dotfiles status --short
+git -C ~/src/dotfiles add susu.json encrypted
+git -C ~/src/dotfiles commit -m "Manage encrypted kube config"
+git -C ~/src/dotfiles push
 ```
 
 On another machine:
 
 ```bash
-git -C "$HOME/src/dotfiles" pull
-susu init "$HOME/src/dotfiles"
+git -C ~/src/dotfiles pull
+susu init ~/src/dotfiles
 susu apply
 ```
 

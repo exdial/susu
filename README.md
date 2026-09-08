@@ -48,17 +48,17 @@ make install
 Create and select a Git repository, then add the files you want to manage:
 
 ```bash
-mkdir -p "$HOME/src"
-git init "$HOME/src/dotfiles"
+mkdir -p ~/src
+git init ~/src/dotfiles
 
-susu init "$HOME/src/dotfiles"
-susu add "$HOME/.zshrc" "$HOME/.gitconfig"
-susu add --sensitive "$HOME/.kube/config"
+susu init ~/src/dotfiles
+susu add ~/.zshrc ~/.gitconfig
+susu add --sensitive ~/.kube/config
 
 susu ls
 
-git -C "$HOME/src/dotfiles" add susu.json public encrypted
-git -C "$HOME/src/dotfiles" commit -m "Manage dotfiles with susu"
+git -C ~/src/dotfiles add susu.json public encrypted
+git -C ~/src/dotfiles commit -m "Manage dotfiles with susu"
 ```
 
 The first sensitive operation asks for a repository password and confirmation. The password is never stored.
@@ -66,8 +66,8 @@ The first sensitive operation asks for a repository password and confirmation. T
 On another machine, use Git to retrieve the repository and `susu` to restore its files:
 
 ```bash
-git clone <repository-url> "$HOME/src/dotfiles"
-susu init "$HOME/src/dotfiles"
+git clone <repository-url> ~/src/dotfiles
+susu init ~/src/dotfiles
 susu ls
 susu apply
 ```
