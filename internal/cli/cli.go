@@ -13,10 +13,10 @@ import (
 
 	"golang.org/x/term"
 
-	"susu/internal/app"
-	"susu/internal/cryptox"
-	"susu/internal/paths"
-	"susu/internal/state"
+	"github.com/exdial/susu/internal/app"
+	"github.com/exdial/susu/internal/cryptox"
+	"github.com/exdial/susu/internal/paths"
+	"github.com/exdial/susu/internal/state"
 )
 
 // CLI is one command runner with explicit output and password dependencies.

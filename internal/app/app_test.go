@@ -13,11 +13,11 @@ import (
 	"strings"
 	"testing"
 
-	"susu/internal/app"
-	"susu/internal/cryptox"
-	"susu/internal/manifest"
-	"susu/internal/paths"
-	"susu/internal/state"
+	"github.com/exdial/susu/internal/app"
+	"github.com/exdial/susu/internal/cryptox"
+	"github.com/exdial/susu/internal/manifest"
+	"github.com/exdial/susu/internal/paths"
+	"github.com/exdial/susu/internal/state"
 )
 
 const testPassword = "correct horse battery staple for integration tests"

@@ -22,7 +22,7 @@ import (
 	"github.com/creack/pty"
 	"golang.org/x/term"
 
-	"susu/internal/cryptox"
+	"github.com/exdial/susu/internal/cryptox"
 )
 
 func TestReadTTYPasswordOpen(t *testing.T) {

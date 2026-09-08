@@ -9,10 +9,10 @@ import (
 	"reflect"
 	"testing"
 
-	"susu/internal/app"
-	"susu/internal/cryptox"
-	"susu/internal/manifest"
-	"susu/internal/repository"
+	"github.com/exdial/susu/internal/app"
+	"github.com/exdial/susu/internal/cryptox"
+	"github.com/exdial/susu/internal/manifest"
+	"github.com/exdial/susu/internal/repository"
 )
 
 func TestAddUpdatePreservesClassificationRegardlessOfFlag(t *testing.T) {

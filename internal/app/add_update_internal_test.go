@@ -8,8 +8,8 @@ import (
 	"reflect"
 	"testing"
 
-	"susu/internal/manifest"
-	"susu/internal/safefs"
+	"github.com/exdial/susu/internal/manifest"
+	"github.com/exdial/susu/internal/safefs"
 )
 
 func writeAddUpdateFile(t *testing.T, filename, contents string) {

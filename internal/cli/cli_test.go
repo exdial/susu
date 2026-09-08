@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"susu/internal/app"
-	"susu/internal/cli"
-	"susu/internal/paths"
-	"susu/internal/repository"
-	"susu/internal/state"
+	"github.com/exdial/susu/internal/app"
+	"github.com/exdial/susu/internal/cli"
+	"github.com/exdial/susu/internal/paths"
+	"github.com/exdial/susu/internal/repository"
+	"github.com/exdial/susu/internal/state"
 )
 
 func TestHelp(t *testing.T) {

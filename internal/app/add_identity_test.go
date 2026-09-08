@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"susu/internal/manifest"
-	"susu/internal/paths"
-	"susu/internal/state"
+	"github.com/exdial/susu/internal/manifest"
+	"github.com/exdial/susu/internal/paths"
+	"github.com/exdial/susu/internal/state"
 )
 
 func TestAddRollsBackSourcesWhenCandidateBecomesAliasBeforeRead(t *testing.T) {

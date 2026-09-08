@@ -1,4 +1,4 @@
-module susu
+module github.com/exdial/susu
 
 go 1.26
 

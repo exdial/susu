@@ -15,7 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"susu/internal/cryptox"
+	"github.com/exdial/susu/internal/cryptox"
 )
 
 const (
