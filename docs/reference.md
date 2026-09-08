@@ -22,7 +22,7 @@ Other operating systems are not supported.
 
 ## Build and install
 
-Prebuilt `.tar.gz` archives are published on the [GitHub Releases](https://github.com/exdial/susu/releases) page for Linux and macOS on both `amd64` and `arm64`. Every release also publishes `checksums.txt`; each archive contains the `susu` binary, `README.md`, `LICENSE`, and `CHANGELOG.md`.
+Prebuilt `.tar.gz` archives are published on the [GitHub Releases](https://github.com/exdial/susu/releases) page for Linux and macOS on both `amd64` and `arm64`. Every release also publishes `checksums.txt`; each archive contains the `susu` binary, `README.md`, `LICENSE`, and `CHANGELOG.md`. Because the macOS release binaries are currently unsigned and not notarized, follow the [macOS Gatekeeper instructions](../README.md#macos-gatekeeper) if macOS blocks the downloaded binary.
 
 To build from source, the module requires Go 1.26. The included `mise.toml` pins a compatible Go toolchain.
 

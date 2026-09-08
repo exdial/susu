@@ -28,6 +28,24 @@ Prebuilt archives are published on the [GitHub Releases](https://github.com/exdi
 
 Every release includes `checksums.txt` for artifact verification. All binaries are packaged as `.tar.gz` archives with `README.md`, `LICENSE`, and `CHANGELOG.md`.
 
+### macOS Gatekeeper
+
+macOS may block `susu` because the release binaries are currently unsigned and not notarized.
+
+Try to run `susu` once. Then open **System Settings -> Privacy & Security** and click **Open Anyway**.
+
+![macOS Gatekeeper warning](docs/assets/macos-gatekeeper-warning.png)
+
+![macOS Open Anyway](docs/assets/macos-gatekeeper-open-anyway.png)
+
+Alternatively, remove the quarantine attribute:
+
+```sh
+xattr -d com.apple.quarantine ./susu
+```
+
+Only do this if you downloaded `susu` from the official [GitHub Releases](https://github.com/exdial/susu/releases) page.
+
 To install from source, Go 1.26 is required. From the repository root, install with the pinned mise toolchain:
 
 ```bash
