@@ -166,7 +166,7 @@ func TestAddMultipleFiles(t *testing.T) {
 	}
 }
 
-func TestAddIsIdempotentAndMixedInputsAddOnlyNewFiles(t *testing.T) {
+func TestAddUpdatesExactEntriesAndMixedInputsAddNewFiles(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{})
 	original := []byte("original repository snapshot\n")
 	existing := mustWriteFile(t, filepath.Join(environment.home, ".existing"), original, 0o644)
@@ -182,8 +182,9 @@ func TestAddIsIdempotentAndMixedInputsAddOnlyNewFiles(t *testing.T) {
 		t.Fatalf("duplicate Add() error = %v", err)
 	}
 	assertStrings(t, duplicate.Added, nil)
-	assertStrings(t, duplicate.AlreadyManaged, []string{"~/.existing"})
-	assertFileContents(t, storedExisting, original)
+	assertStrings(t, duplicate.AlreadyManaged, nil)
+	assertStrings(t, duplicate.Updated, []string{"~/.existing"})
+	assertFileContents(t, storedExisting, []byte("new destination contents\n"))
 
 	newContents := []byte("new file snapshot\n")
 	newFile := mustWriteFile(t, filepath.Join(environment.home, ".new"), newContents, 0o600)
@@ -192,8 +193,9 @@ func TestAddIsIdempotentAndMixedInputsAddOnlyNewFiles(t *testing.T) {
 		t.Fatalf("mixed Add() error = %v", err)
 	}
 	assertStrings(t, mixed.Added, []string{"~/.new"})
-	assertStrings(t, mixed.AlreadyManaged, []string{"~/.existing"})
-	assertFileContents(t, storedExisting, original)
+	assertStrings(t, mixed.AlreadyManaged, nil)
+	assertStrings(t, mixed.Updated, []string{"~/.existing"})
+	assertFileContents(t, storedExisting, []byte("new destination contents\n"))
 	assertFileContents(t, repositorySource(t, environment, "~/.new", false), newContents)
 	assertStrings(t, managedPaths(t, environment.service), []string{"~/.existing", "~/.new"})
 }
@@ -437,6 +439,8 @@ func TestAddIgnoresExplicitKubeCachePathsWithoutPassword(t *testing.T) {
 	environment := newTestEnvironment(t, testEnvironmentOptions{})
 	cacheDirectory := filepath.Join(environment.home, ".kube", "cache")
 	cachedFile := mustWriteFile(t, filepath.Join(cacheDirectory, "discovery", "example"), []byte("discovery cache\n"), 0o600)
+	manifestPath := filepath.Join(environment.repository, manifest.Filename)
+	manifestBefore := mustReadFile(t, manifestPath)
 	var passwordCalls []bool
 
 	result, err := environment.service.Add([]string{cacheDirectory, cachedFile}, app.AddOptions{
@@ -447,8 +451,10 @@ func TestAddIgnoresExplicitKubeCachePathsWithoutPassword(t *testing.T) {
 		t.Fatalf("Add(kube cache) error = %v", err)
 	}
 	assertStrings(t, result.Added, nil)
+	assertStrings(t, result.Updated, nil)
 	assertStrings(t, result.AlreadyManaged, nil)
 	assertPasswordCalls(t, passwordCalls, nil)
+	assertFileContents(t, manifestPath, manifestBefore)
 	assertStrings(t, managedPaths(t, environment.service), nil)
 	assertPathDoesNotExist(t, repositorySource(t, environment, "~/.kube/cache/discovery/example", true))
 }

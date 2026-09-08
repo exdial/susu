@@ -53,7 +53,7 @@ _susu() {
   local -a commands
   commands=(
     'init:initialize susu in an existing Git repository'
-    'add:start managing files or directories'
+    'add:add or update file snapshots'
     'rm:stop managing files'
     'ls:list managed files'
     'list:alias for ls'

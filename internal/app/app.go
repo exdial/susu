@@ -103,9 +103,11 @@ type AddOptions struct {
 	Password  PasswordProvider
 }
 
-// AddResult separates new entries from idempotently skipped paths.
+// AddResult reports committed additions and per-file updates separately from
+// skipped physical aliases. Updated paths remain committed even on a later error.
 type AddResult struct {
 	Added          []string
+	Updated        []string
 	AlreadyManaged []string
 }
 
@@ -115,7 +117,12 @@ type candidate struct {
 	relative string
 	logical  string
 	identity fs.FileInfo
-	source   string
+}
+
+type addOperation struct {
+	candidate
+	entry  manifest.Entry
+	update bool
 }
 
 type managedFileIdentity struct {
@@ -150,10 +157,13 @@ type controlBoundary struct {
 
 type addHooks struct {
 	beforeCandidateRead func(logical string) error
+	updateAtomicHooks   func(logical string) atomicReplaceHooks
+	saveManifest        func(manifest.Manifest) error
 }
 
-// Add starts managing regular files. Directories are recursively expanded into
-// individual entries; existing entries are skipped without overwriting storage.
+// Add captures regular files, updating exact managed entries without changing
+// their classification. Different logical physical aliases are skipped.
+// Updates commit per file; failures roll back only uncommitted new entries.
 func (s *Service) Add(inputs []string, options AddOptions) (AddResult, error) {
 	return s.addWithHooks(inputs, options, addHooks{})
 }
@@ -172,9 +182,12 @@ func (s *Service) addWithHooks(inputs []string, options AddOptions, hooks addHoo
 	if err != nil {
 		return AddResult{}, err
 	}
-	candidates, err := s.collectCandidates(inputs, options.Sensitive, boundary)
+	candidates, err := s.collectCandidates(inputs, boundary)
 	if err != nil {
 		return AddResult{}, err
+	}
+	if len(candidates) == 0 {
+		return AddResult{}, nil
 	}
 	managed := make(map[string]manifest.Entry, len(current.Entries))
 	sources := make(map[string]string, len(current.Entries))
@@ -183,54 +196,79 @@ func (s *Service) addWithHooks(inputs []string, options AddOptions, hooks addHoo
 		sources[entry.Source] = entry.Path
 	}
 
-	hasNewLogical := false
-	for _, item := range candidates {
-		if _, exists := managed[item.logical]; !exists {
-			hasNewLogical = true
-			break
-		}
-	}
-	if !hasNewLogical {
-		result := AddResult{AlreadyManaged: make([]string, 0, len(candidates))}
-		for _, item := range candidates {
-			result.AlreadyManaged = append(result.AlreadyManaged, item.logical)
-		}
-		return result, nil
-	}
-
 	managedIdentities, err := s.loadManagedFileIdentities(current.Entries)
 	if err != nil {
 		return AddResult{}, err
 	}
 	result := AddResult{}
-	newCandidates := make([]candidate, 0, len(candidates))
+	operations := make([]addOperation, 0, len(candidates))
+	writeCandidates := make([]candidate, 0, len(candidates))
+	updated := current
+	updated.Entries = append([]manifest.Entry(nil), current.Entries...)
+	needsPassword := false
 	for _, item := range candidates {
-		if _, exists := managed[item.logical]; exists {
-			result.AlreadyManaged = append(result.AlreadyManaged, item.logical)
-			continue
-		}
-		if _, exists := physicalIdentityOwner(item.identity, managedIdentities); exists {
-			result.AlreadyManaged = append(result.AlreadyManaged, item.logical)
-			continue
-		}
-		for _, existing := range newCandidates {
-			if os.SameFile(item.identity, existing.identity) {
-				return AddResult{}, destinationConflict(existing.logical, item.logical)
+		entry, exact := managed[item.logical]
+		owner := ""
+		for _, identity := range managedIdentities {
+			if !os.SameFile(item.identity, identity.info) {
+				continue
 			}
+			if owner != "" && owner != identity.logical {
+				return AddResult{}, destinationConflict(owner, identity.logical)
+			}
+			owner = identity.logical
 		}
-		if existingPath, exists := sources[item.source]; exists {
-			return AddResult{}, fmt.Errorf("repository source %q for %q is already used by %q", item.source, item.logical, existingPath)
+		if exact {
+			if err := ensureCandidateOwner(item.logical, item.identity, managedIdentities); err != nil {
+				return AddResult{}, err
+			}
+		} else {
+			if owner != "" {
+				result.AlreadyManaged = append(result.AlreadyManaged, item.logical)
+				continue
+			}
+			source, err := manifest.SourceFor(item.logical, options.Sensitive)
+			if err != nil {
+				return AddResult{}, err
+			}
+			entry = manifest.Entry{Path: item.logical, Source: source, Sensitive: options.Sensitive}
+			if existingPath, exists := sources[source]; exists {
+				return AddResult{}, fmt.Errorf("repository source %q for %q is already used by %q", source, item.logical, existingPath)
+			}
+			sources[source] = item.logical
+			updated.Entries = append(updated.Entries, entry)
 		}
-		sources[item.source] = item.logical
-		newCandidates = append(newCandidates, item)
+		operations = append(operations, addOperation{candidate: item, entry: entry, update: exact})
+		writeCandidates = append(writeCandidates, item)
+		needsPassword = needsPassword || entry.Sensitive
 	}
-	if len(newCandidates) == 0 {
+	if len(operations) == 0 {
 		return result, nil
 	}
+	if updated.Crypto != nil || !needsPassword {
+		if err := manifest.Validate(updated); err != nil {
+			return AddResult{}, err
+		}
+	}
+	preflight := func() error {
+		if err := s.preflightCandidates(writeCandidates, current.Entries, boundary); err != nil {
+			return err
+		}
+		for _, operation := range operations {
+			if operation.update {
+				if err := validateAddUpdateSource(repo, operation.entry.Source); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := preflight(); err != nil {
+		return AddResult{}, err
+	}
 
-	updated := current
 	var masterKey []byte
-	if options.Sensitive {
+	if needsPassword {
 		if options.Password == nil {
 			return AddResult{}, ErrPasswordRequired
 		}
@@ -257,76 +295,93 @@ func (s *Service) addWithHooks(inputs []string, options AddOptions, hooks addHoo
 		defer cryptox.ZeroBytes(masterKey)
 	}
 
-	if err := s.preflightCandidates(newCandidates, current.Entries, boundary); err != nil {
+	if err := manifest.Validate(updated); err != nil {
+		return AddResult{}, err
+	}
+	if err := preflight(); err != nil {
 		return AddResult{}, err
 	}
 
-	created := make([]string, 0, len(newCandidates))
+	created := make([]string, 0, len(operations))
 	rollback := func() {
 		for _, source := range created {
 			_ = repo.RemoveSource(source)
 		}
+		result.Added = nil
 	}
-	for _, item := range newCandidates {
+	for _, operation := range operations {
+		item := operation.candidate
 		if hooks.beforeCandidateRead != nil {
 			if err := hooks.beforeCandidateRead(item.logical); err != nil {
 				rollback()
-				return AddResult{}, fmt.Errorf("run pre-read hook for %q: %w", item.logical, err)
+				return result, fmt.Errorf("run pre-read hook for %q: %w", item.logical, err)
 			}
 		}
-		if err := s.preflightCandidates(newCandidates, current.Entries, boundary); err != nil {
+		if err := preflight(); err != nil {
 			rollback()
-			return AddResult{}, fmt.Errorf("recheck add candidates before reading %q: %w", item.logical, err)
+			return result, fmt.Errorf("recheck add candidates before reading %q: %w", item.logical, err)
 		}
 		contents, openedMode, err := s.readCandidate(item, current.Entries, boundary)
 		if err != nil {
 			rollback()
-			return AddResult{}, fmt.Errorf("read %q: %w", item.absolute, err)
+			return result, fmt.Errorf("read %q: %w", item.absolute, err)
 		}
 		storedContents := contents
 		fileMode := os.FileMode(0o644)
 		if openedMode.Perm()&0o111 != 0 {
 			fileMode = 0o755
 		}
-		if options.Sensitive {
+		if operation.entry.Sensitive {
 			storedContents, err = cryptox.Encrypt(masterKey, item.logical, contents)
 			cryptox.ZeroBytes(contents)
 			if err != nil {
 				rollback()
-				return AddResult{}, fmt.Errorf("encrypt %q: %w", item.logical, err)
+				return result, fmt.Errorf("encrypt %q: %w", item.logical, err)
 			}
 			fileMode = 0o600
 		}
 
-		if err := repo.WriteNewSource(item.source, storedContents, fileMode); err != nil {
-			if options.Sensitive {
-				cryptox.ZeroBytes(storedContents)
+		if operation.update {
+			atomicHooks := atomicReplaceHooks{}
+			if hooks.updateAtomicHooks != nil {
+				atomicHooks = hooks.updateAtomicHooks(item.logical)
 			}
-			rollback()
-			return AddResult{}, fmt.Errorf("store %q: %w", item.logical, err)
+			var committed bool
+			committed, err = replaceAddSource(repo, operation.entry.Source, storedContents, fileMode, atomicHooks)
+			if committed {
+				result.Updated = append(result.Updated, item.logical)
+			}
+		} else {
+			err = repo.WriteNewSource(operation.entry.Source, storedContents, fileMode)
+			if err == nil {
+				created = append(created, operation.entry.Source)
+				result.Added = append(result.Added, item.logical)
+			}
 		}
-		if options.Sensitive {
+		if operation.entry.Sensitive {
 			cryptox.ZeroBytes(storedContents)
 		}
-		created = append(created, item.source)
-		updated.Entries = append(updated.Entries, manifest.Entry{
-			Path:      item.logical,
-			Source:    item.source,
-			Sensitive: options.Sensitive,
-		})
-		result.Added = append(result.Added, item.logical)
+		if err != nil {
+			rollback()
+			return result, fmt.Errorf("store %q: %w", item.logical, err)
+		}
 	}
 
-	if err := s.preflightCandidates(newCandidates, current.Entries, boundary); err != nil {
+	if err := preflight(); err != nil {
 		rollback()
-		return AddResult{}, fmt.Errorf("recheck add candidates before committing susu.json: %w", err)
+		return result, fmt.Errorf("recheck add candidates before committing susu.json: %w", err)
 	}
-	if err := repo.SaveManifest(updated); err != nil {
-		if !errors.Is(err, manifest.ErrCommitted) {
-			rollback()
-			return AddResult{}, err
+	if len(created) != 0 {
+		saveManifest := hooks.saveManifest
+		if saveManifest == nil {
+			saveManifest = repo.SaveManifest
 		}
-		return result, err
+		if err := saveManifest(updated); err != nil {
+			if !errors.Is(err, manifest.ErrCommitted) {
+				rollback()
+			}
+			return result, err
+		}
 	}
 	return result, nil
 }
@@ -757,13 +812,33 @@ func (s *Service) openLocked() (*repository.Repository, manifest.Manifest, func(
 	return repo, current, combinedRelease, nil
 }
 
-func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *controlBoundary) ([]candidate, error) {
+func validateAddUpdateSource(repo *repository.Repository, source string) error {
+	file, err := repo.OpenSource(source)
+	if err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close existing repository source %q: %w", source, err)
+	}
+	return nil
+}
+
+func replaceAddSource(repo *repository.Repository, source string, contents []byte, mode os.FileMode, hooks atomicReplaceHooks) (bool, error) {
+	// OpenSource validates the source path and requires an existing regular,
+	// no-follow leaf. Rename then breaks hard links rather than writing through them.
+	if err := validateAddUpdateSource(repo, source); err != nil {
+		return false, err
+	}
+	return atomicReplaceRootedWithHooks(repo.Root, filepath.FromSlash(source), mode, 0o755,
+		func(writer io.Writer) error { return writeAll(writer, contents) }, hooks)
+}
+
+func (s *Service) collectCandidates(inputs []string, boundary *controlBoundary) ([]candidate, error) {
 	ignorePolicy, err := s.loadAddIgnorePolicy()
 	if err != nil {
 		return nil, err
 	}
 	byLogical := make(map[string]candidate)
-	bySource := make(map[string]string)
 	for _, input := range inputs {
 		logical, err := s.paths.Normalize(input)
 		if err != nil {
@@ -827,7 +902,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *c
 				if !entryInfo.Mode().IsRegular() {
 					return nil
 				}
-				return s.addCandidate(byLogical, bySource, rootPath, childRelative, childAbsolute, sensitive, boundary, ignorePolicy)
+				return s.addCandidate(byLogical, rootPath, childRelative, childAbsolute, boundary, ignorePolicy)
 			})
 			closeErr := root.Close()
 			if err != nil {
@@ -845,7 +920,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *c
 		if err := root.Close(); err != nil {
 			return nil, fmt.Errorf("close path root for %q: %w", absolute, err)
 		}
-		if err := s.addCandidate(byLogical, bySource, rootPath, relative, absolute, sensitive, boundary, ignorePolicy); err != nil {
+		if err := s.addCandidate(byLogical, rootPath, relative, absolute, boundary, ignorePolicy); err != nil {
 			return nil, err
 		}
 	}
@@ -858,7 +933,7 @@ func (s *Service) collectCandidates(inputs []string, sensitive bool, boundary *c
 	return result, nil
 }
 
-func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[string]string, root, relative, absolute string, sensitive bool, boundary *controlBoundary, ignorePolicy addIgnorePolicy) error {
+func (s *Service) addCandidate(byLogical map[string]candidate, root, relative, absolute string, boundary *controlBoundary, ignorePolicy addIgnorePolicy) error {
 	if err := boundary.ensureOutside(absolute); err != nil {
 		return fmt.Errorf("add discovered file %q: %w", absolute, err)
 	}
@@ -873,18 +948,11 @@ func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[stri
 	if err != nil {
 		return fmt.Errorf("normalize discovered file %q: %w", absolute, err)
 	}
-	source, err := manifest.SourceFor(logical, sensitive)
-	if err != nil {
-		return err
-	}
 	if _, exists := byLogical[logical]; exists {
 		return nil
 	}
-	if existingLogical, exists := bySource[source]; exists && existingLogical != logical {
-		return fmt.Errorf("paths %q and %q map to the same repository source %q", existingLogical, logical, source)
-	}
 
-	item := candidate{absolute: absolute, root: root, relative: relative, logical: logical, source: source}
+	item := candidate{absolute: absolute, root: root, relative: relative, logical: logical}
 	file, info, err := openCandidate(item, boundary)
 	if err != nil {
 		return fmt.Errorf("inspect discovered file %q: %w", absolute, err)
@@ -893,7 +961,6 @@ func (s *Service) addCandidate(byLogical map[string]candidate, bySource map[stri
 		return fmt.Errorf("close discovered file %q: %w", absolute, err)
 	}
 	item.identity = info
-	bySource[source] = logical
 	byLogical[logical] = item
 	return nil
 }
@@ -969,6 +1036,15 @@ func physicalIdentityOwner(info fs.FileInfo, identities []managedFileIdentity) (
 	return "", false
 }
 
+func ensureCandidateOwner(logical string, info fs.FileInfo, identities []managedFileIdentity) error {
+	for _, identity := range identities {
+		if identity.logical != logical && os.SameFile(info, identity.info) {
+			return destinationConflict(identity.logical, logical)
+		}
+	}
+	return nil
+}
+
 func destinationConflict(first, second string) error {
 	return fmt.Errorf("%w between %q and %q", ErrDestinationConflict, first, second)
 }
@@ -984,9 +1060,9 @@ func (s *Service) preflightCandidates(candidates []candidate, entries []manifest
 		if err != nil {
 			return fmt.Errorf("preflight %q: %w", item.absolute, err)
 		}
-		if existing, exists := physicalIdentityOwner(info, managedIdentities); exists {
+		if err := ensureCandidateOwner(item.logical, info, managedIdentities); err != nil {
 			_ = file.Close()
-			return destinationConflict(existing, item.logical)
+			return err
 		}
 		if existing, exists := physicalIdentityOwner(info, openedIdentities); exists {
 			_ = file.Close()
@@ -1011,8 +1087,8 @@ func (s *Service) readCandidate(item candidate, entries []manifest.Entry, bounda
 	if err != nil {
 		return nil, 0, err
 	}
-	if existing, exists := physicalIdentityOwner(info, managedIdentities); exists {
-		return nil, 0, destinationConflict(existing, item.logical)
+	if err := ensureCandidateOwner(item.logical, info, managedIdentities); err != nil {
+		return nil, 0, err
 	}
 
 	contents, err := io.ReadAll(io.LimitReader(file, maxManagedFileSize+1))

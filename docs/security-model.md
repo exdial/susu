@@ -55,7 +55,7 @@ The relevant trust boundaries are:
 | `HOME` and `XDG_CONFIG_HOME` | Authorized plaintext roots. `apply` is expected to create usable plaintext files there, except beneath the runtime-specific protected control roots. |
 | Local `susu` state directory | Protected control root containing the active binding, local lock, and state staging files. Its finite file identities are also protected from hard-linked `add` aliases. |
 | Active repository worktree and Git common directory | Protected control roots containing portable snapshots, manifest state, Git metadata, locks, and staging files. Exact, descendant, ancestor, canonical, physical, and filesystem-resolved case aliases are rejected for `add` and `apply`. Linked worktrees can have two disjoint protected roots. |
-| Filesystem-identity and destination validation timing | Input/discovery overlaps and initial add identity conflicts fail before password processing. After an optional `add` password callback, every new candidate is rechecked before any candidate content or repository source is written, command-wide before each descriptor read, and once more before manifest commit. `apply` checks the complete destination set before unlock, after unlock, after source/authentication preflight, and immediately before each replacement; protected-root errors have priority over alias errors. |
+| Filesystem-identity and destination validation timing | Input/discovery overlaps and initial add identity conflicts fail before password processing. After an optional `add` password callback, every new or update candidate is rechecked before any candidate content or repository source is written, command-wide before each descriptor read, and once more before manifest commit. `apply` checks the complete destination set before unlock, after unlock, after source/authentication preflight, and immediately before each replacement; protected-root errors have priority over alias errors. |
 | Filesystem and random source | Expected to implement the requested Unix permission, descriptor, rename, link, sync, and cryptographic-randomness semantics correctly. |
 | Git transport, signing, review, and history | Outside `susu`; Git and the operator remain responsible for them. |
 
@@ -292,14 +292,17 @@ After structural validation, AES-GCM authentication must succeed with the reposi
 | Command | Password behavior | Plaintext flow and persistence |
 | --- | --- | --- |
 | `init` | No prompt | Creates or validates repository metadata and local binding; moves no managed content. |
-| public `add` | No prompt | Reads the source into memory and writes plaintext under `public/`. This is intentional. |
-| sensitive `add` | One creation sequence or one unlock prompt | Reads each source into memory, encrypts it, and writes only the JSON envelope under `encrypted/`. The original source remains plaintext. |
+| `add` with only public additions/updates | No prompt | Reads local content into memory and installs or atomically replaces plaintext snapshots under `public/`. This is intentional. |
+| `add` with sensitive additions/updates | One unlock prompt, or a creation sequence only for new sensitive entries when crypto is absent | Reads local content into memory, encrypts it, and installs or atomically replaces only JSON ciphertext envelopes under `encrypted/`. Sensitive repository staging contains ciphertext only. The original local file remains plaintext. |
+| `add` with only different-logical-path managed aliases | No prompt | Reports `AlreadyManaged` without changing snapshots, even for sensitive owners. |
 | `ls` (`list` alias) | No prompt | Reads manifest metadata only; it does not read or decrypt file contents. |
 | public `show` | No prompt | Streams the repository plaintext source to stdout. |
 | sensitive `show` | One unlock prompt | Reads the envelope, authenticates and decrypts it in memory, then writes plaintext to stdout. It does not modify the destination or create a plaintext file. |
 | `apply` with no sensitive entry | No prompt | Streams public sources through same-directory staging files to destinations. |
 | `apply` with sensitive entries | One unlock prompt for the invocation | Authenticates and decrypts all sensitive files in memory during preflight, then writes each through a same-directory plaintext staging file to its destination. |
 | `rm` | No prompt | Removes the manifest entry and unlinks its repository source after the manifest transition; it does not decrypt or remove the destination. |
+
+Ordinary `add` updates exact managed logical paths without an update flag. Existing `Entry` source paths and sensitivity are preserved regardless of `--sensitive`; the flag classifies new entries only. An existing sensitive update therefore requires one unlock even without the flag, shared with any new sensitive additions. A mixed invocation initializes crypto only if there are new sensitive entries and no crypto metadata. Recursive discovery adds new files and refreshes discovered managed files without deleting entries missing locally.
 
 `apply` processes all managed entries. Every destination is checked against the private state directory, active worktree, and Git common directory and compared with all other destinations. An existing protected overlap or alias conflict fails before repository-source access or password prompting. The complete set is checked again after unlock, after source/authentication preflight, and immediately before every replacement.
 
@@ -393,9 +396,9 @@ The concrete HOME path resolved from `~/.kube/cache` and its descendants are ign
 
 Before walking, `add` rejects an input that is inside the private state directory, active worktree, or Git common directory, names one of those roots, or is an ancestor containing one. Canonical, physical, symlink, and filesystem-resolved case aliases are included, and these direct overlaps fail before a sensitive password prompt. A hard-linked protected state file inside an otherwise unrelated tree is rejected during discovery.
 
-Every ordinary candidate is opened beneath its HOME/XDG root, validated as a regular file, and assigned the identity from that descriptor. A different logical candidate that matches an existing managed regular leaf through `os.SameFile` is treated as already managed without password or repository mutation. Existing managed leaves use `Lstat`, so a leaf symlink does not transfer ownership to its target. Two new candidates with one physical identity fail the complete invocation.
+Every ordinary candidate is opened beneath its HOME/XDG root, validated as a regular file, and assigned the identity from that descriptor. A different logical candidate that matches an existing managed regular leaf through `os.SameFile` is treated as already managed without password or repository mutation. Existing managed leaves use `Lstat`, so a leaf symlink does not transfer ownership to its target. An exact logical match is an update, not an alias skip. Candidates with multiple managed owners and two new candidates with one physical identity are rejected rather than choosing an owner.
 
-After any required password callback, `add` reopens and validates every new candidate against protected roots, managed regular leaves, and every other candidate before reading content or writing a source. It repeats this command-wide check before each candidate read, reads from the same descriptor that passed validation, and checks the complete set again before committing `susu.json`. This detects either direction of a late hard-link or namespace substitution; a conflict after earlier source writes triggers source rollback. These checks reduce time-of-check/time-of-use exposure, but same-user namespace mutation in the remaining check-to-use intervals remains outside the threat model.
+After any required password callback, `add` reopens and validates every new or update candidate against protected roots, managed regular leaves, and every other candidate before reading content or writing a source. It repeats this command-wide check before each candidate read, reads from the same descriptor that passed validation, and checks the complete set again before committing `susu.json`. This detects either direction of a late hard-link or namespace substitution; a conflict after earlier source writes triggers best-effort rollback of newly created sources if the manifest has not committed, but already-committed updates remain and are reported as `Updated`. These checks reduce time-of-check/time-of-use exposure, but same-user namespace mutation in the remaining check-to-use intervals remains outside the threat model.
 
 Recursive collection still has no general user-configurable name-based ignore list. The built-in Kubernetes cache exclusion is skipped, the three protected runtime roots are always rejected, and unrelated cache, staging, or control locations are ordinary inputs unless another rule excludes them.
 
@@ -411,6 +414,16 @@ A new source is never silently overwritten. `susu`:
 6. syncs the directory.
 
 Sensitive sources are set to mode `0600`; public sources are normalized to `0644` or `0755` according to whether the input had any executable bit. Git does not preserve the full `0600` mode across clones, but the stored sensitive bytes remain ciphertext.
+
+### Updating repository sources
+
+An exact managed update preserves the existing source path and sensitivity. Before replacement, the stored source must be present and openable as a regular file through no-follow traversal. Missing sources, leaf or parent symlinks, and special files are errors; updates do not repair or recreate invalid storage. This differs from a new-source collision: an unreferenced path at a new entry's deterministic source location is never overwritten.
+
+Updates reuse `atomicReplaceRooted`, the same per-file mechanism as `apply`: create an exclusive same-directory `.susu-apply-<24 hex characters>.tmp` staging file, write the complete content, sync and close it, rename it over the existing source, and sync the parent. Sensitive update content is encrypted in memory before staging, so both staging and final repository files contain ciphertext only, with mode `0600`. Public updates use the ordinary `0644`/`0755` mode policy. The `.susu-apply-` prefix does not imply plaintext when used for repository updates.
+
+There is no global transaction or backup. Once an update rename commits, that snapshot remains and is reported as `Updated` even if directory sync or a later operation fails. A directory-sync error leaves durability uncertain. Cleanup before rename is best effort and limited to the exact staging name created for that replacement; after rename, ownership of that staging name ends. Crashes or cleanup failures can leave residue, and later invocations do not scavenge neighboring names. Sensitive update residue is ciphertext, unlike sensitive `apply` destination residue.
+
+Additions retain new-source-first, manifest-last ordering. If the manifest has not committed, failure triggers best-effort removal of newly created sources, never rollback of committed updates. If the manifest commits and a later sync fails, additions remain reported as `Added`. Update-only invocations do not rewrite the manifest. The CLI prints `added`, `updated`, and `already managed` groups before returning an operation error.
 
 ### Manifest and local state
 

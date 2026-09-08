@@ -47,10 +47,10 @@ To build and install the binary with Go:
 make install
 ```
 
-When using the pinned mise toolchain, run `mise exec -- make install` instead. The target uses `go install`, which writes `susu` to `GOBIN` or, when `GOBIN` is unset, to the `bin` directory under `go env GOPATH`. To install into `$HOME/.local/bin` explicitly:
+When using the pinned mise toolchain, run `mise exec -- make install` instead. The target uses `go install`, which writes `susu` to `GOBIN` or, when `GOBIN` is unset, to the `bin` directory under `go env GOPATH`. To install into `~/.local/bin` explicitly:
 
 ```bash
-GOBIN="$HOME/.local/bin" make install
+GOBIN=~/.local/bin make install
 ```
 
 Ensure the selected binary directory is on `PATH`. Release maintainers should follow the [release procedure](releasing.md).
@@ -60,20 +60,20 @@ Ensure the selected binary directory is on `PATH`. Release maintainers should fo
 The repository passed to `susu init` must already be the root of a Git repository. This example creates one, adds public and sensitive files, and then commits the result with Git:
 
 ```bash
-mkdir -p "$HOME/src"
-git init "$HOME/src/dotfiles"
+mkdir -p ~/src
+git init ~/src/dotfiles
 
-susu init "$HOME/src/dotfiles"
+susu init ~/src/dotfiles
 
-susu add "$HOME/.zshrc"
-susu add "$HOME/.gitconfig" "$HOME/.vimrc"
-susu add --sensitive "$HOME/.kube/config"
+susu add ~/.zshrc
+susu add ~/.gitconfig ~/.vimrc
+susu add --sensitive ~/.kube/config
 
 susu ls
 
-git -C "$HOME/src/dotfiles" status --short
-git -C "$HOME/src/dotfiles" add susu.json public encrypted
-git -C "$HOME/src/dotfiles" commit -m "Manage dotfiles with susu"
+git -C ~/src/dotfiles status --short
+git -C ~/src/dotfiles add susu.json public encrypted
+git -C ~/src/dotfiles commit -m "Manage dotfiles with susu"
 ```
 
 The first operation that needs sensitive storage asks for a repository password and confirmation. The password is not requested by `init` and is never stored.
@@ -81,9 +81,9 @@ The first operation that needs sensitive storage asks for a repository password 
 On another machine, let Git retrieve the repository and let `susu` restore the files:
 
 ```bash
-git clone <repository-url> "$HOME/src/dotfiles"
+git clone <repository-url> ~/src/dotfiles
 
-susu init "$HOME/src/dotfiles"
+susu init ~/src/dotfiles
 susu ls
 susu apply
 ```
@@ -95,7 +95,7 @@ susu apply
 | Command | Meaning | Data direction |
 | --- | --- | --- |
 | `susu init <repository>` | Initialize susu in an existing Git repository | repository path -> local binding |
-| `susu add [options] <path...>` | Start managing files or directories | filesystem -> repository |
+| `susu add [options] <path...>` | Capture new files or update managed snapshots, including recursively | filesystem -> repository |
 | `susu rm <path...>` | Stop managing files | removes repository entries and copies |
 | `susu ls` | List managed files (`susu list` is an alias) | manifest -> stdout |
 | `susu show <path>` | Print a stored file | repository -> stdout |
@@ -111,7 +111,7 @@ Running `susu` without a command is valid and exits successfully. Before initial
 Ordinary user errors return clear, actionable diagnostics and a non-zero process exit status; they do not panic. Diagnostics must distinguish enough context for the user to correct at least these classes of failure:
 
 - an uninitialized repository-dependent command, or an unavailable or invalid local repository binding;
-- a path that does not exist, is already managed, or is not managed;
+- a path that does not exist, is not managed when required, or has conflicting physical owners;
 - an unsupported runtime platform;
 - Git repository validation failure;
 - an invalid repository password or corrupted encrypted data;
@@ -146,7 +146,7 @@ An omitted, extra, or unsupported shell is an error. Completion generation does 
 ### `susu init`
 
 ```bash
-susu init "$HOME/src/dotfiles"
+susu init ~/src/dotfiles
 ```
 
 `init`:
@@ -168,23 +168,29 @@ The binding is machine-local; it is not written into the dotfiles repository. Ru
 Add one or more files:
 
 ```bash
-susu add "$HOME/.zshrc"
-susu add "$HOME/.gitconfig" "$HOME/.vimrc"
+susu add ~/.zshrc
+susu add ~/.gitconfig ~/.vimrc
 ```
 
 Add a directory recursively:
 
 ```bash
-susu add "$HOME/.vim"
+susu add ~/.vim
 ```
 
 A directory is expanded into one manifest entry per discovered file. The directory itself is not stored as an opaque entry.
 
-`add` means **start managing**, not synchronize. For each new file it resolves the path, derives a portable logical destination, copies or encrypts its current contents into the repository, and adds an entry to `susu.json`. If an input is already managed, its entry is not duplicated and its stored contents are not silently overwritten. In a mixed invocation, new inputs can still be added while existing entries remain unchanged.
+Ordinary `add` **captures new files and updates exact managed snapshots**, with no update flag. For each new file it resolves the path, derives a portable logical destination, copies or encrypts its current contents into the repository, and adds an entry to `susu.json`. For an exact already-managed logical path, it replaces the stored snapshot with the current local contents while preserving the existing entry, including its source path and sensitivity, regardless of `--sensitive`. Recursive adds refresh discovered managed regular files and add new ones; they do not remove manifest entries whose local files are missing.
 
-Candidate identity is taken from an opened, validated regular-file descriptor. A different logical path that identifies the same physical regular file as an existing managed destination is reported as already managed; it does not inherit new sensitivity, create a source, or request a password. The existing managed leaf is inspected without following a leaf symlink, so a symlink target does not become managed by association. If two new logical candidates in one invocation identify the same file, the entire invocation fails instead of choosing one identity. This detects hard links and any case or normalization aliases that the active filesystem exposes.
+For example, after editing a managed `.zshrc`, run `susu add ~/.zshrc` again to update its snapshot. An existing update source in the repository must be present and openable as a regular file without following symlinks; a missing, symlinked, or special-file source is an error, not repaired by `add`. For a new entry, any existing unreferenced file at its deterministic source path is a collision and is never overwritten.
 
-The active private `susu` state directory, active repository worktree, and Git common administrative directory are never valid managed inputs. `add` rejects each protected root, every path inside it, and any ancestor input that contains it. Canonical, symlink, physical, and case aliases exposed by the filesystem are checked; the finite set of protected local-state files is also checked by opened-file identity so hard-linked aliases cannot be captured. Direct and ancestor overlaps are rejected before directory walking or a sensitive password prompt. After any required password callback, `add` reopens and validates every new candidate before reading any candidate content or writing any repository source. It repeats the command-wide identity and boundary check before every candidate read, reads from the same descriptor that passed validation, and checks once more before committing `susu.json`. A password-time or later substitution therefore fails before commit; sources created earlier in the invocation are rolled back. Use a narrower input path outside the protected control roots.
+Updates use atomic per-file replacement, without backups or a global transaction. If a later read, validation, write, or manifest operation fails, updates whose rename already committed remain in place and are reported as `Updated`, including a replacement followed by a directory-sync error (durability is uncertain). New sources are installed before the manifest is saved. If the manifest has not committed, newly created sources are rolled back on a best-effort basis; committed updates are not. If the manifest rename committed but a later sync fails, additions remain and are reported as `Added`. An update-only invocation does not rewrite `susu.json`. Crashes or failed cleanup can leave unreferenced sources or staging files for manual inspection.
+
+The CLI prints results in `added <path>`, `updated <path>`, and `already managed <path>` groups, in that order, including committed results before returning an error with a non-zero exit status.
+
+Candidate identity is taken from an opened, validated regular-file descriptor. A different logical path that identifies the same physical regular file as an existing managed destination is reported as already managed; it does not inherit new sensitivity, create a source, or request a password. The existing managed leaf is inspected without following a leaf symlink, so a symlink target does not become managed by association. An alias alone never triggers a password prompt, even if its managed owner is sensitive. If one candidate has multiple managed owners, or two new logical candidates in one invocation identify the same file, the invocation fails instead of choosing one identity. This detects hard links and any case or normalization aliases that the active filesystem exposes.
+
+The active private `susu` state directory, active repository worktree, and Git common administrative directory are never valid managed inputs. `add` rejects each protected root, every path inside it, and any ancestor input that contains it. Canonical, symlink, physical, and case aliases exposed by the filesystem are checked; the finite set of protected local-state files is also checked by opened-file identity so hard-linked aliases cannot be captured. Direct and ancestor overlaps are rejected before directory walking or a sensitive password prompt. After any required password callback, `add` reopens and validates every new or update candidate before reading any candidate content or writing any repository source. It repeats the command-wide identity and boundary check before every candidate read, reads from the same descriptor that passed validation, and checks once more before committing `susu.json`. A password-time substitution therefore fails before content writes. A later substitution can fail after some updates have committed; those updates remain reported, while newly created sources are rolled back if the manifest has not committed. Use a narrower input path outside the protected control roots.
 
 Public files use a Git-portable mode policy: non-executable files are stored and applied as `0644`, while files with any executable bit are stored and applied as `0755`. Git does not preserve arbitrary Unix permission bits. Sensitive destinations always use `0600`.
 
@@ -192,7 +198,7 @@ Public files use a Git-portable mode policy: non-executable files are stored and
 
 `~/.kube/cache` is generated Kubernetes client cache data and is not manageable. `add` resolves this location from the configured HOME independently of XDG normalization, skips its real directory and physical/case aliases during recursive walking, and ignores explicitly supplied regular files or real directories at or below it. Similar names such as `~/.kube/cache.yaml` and `~/.kube/caches/` remain ordinary candidates. An invocation containing only ignored cache paths makes no repository change and does not request a sensitive password. Explicit symlinks and special files continue to follow the normal object policy below and are rejected rather than silently ignored.
 
-Existing manifests created by earlier versions are not rewritten automatically; the exclusion affects only new `add` candidate discovery.
+Existing manifests created by earlier versions are not rewritten automatically; the exclusion affects `add` candidate discovery for both additions and updates.
 
 #### Symlinks and special files
 
@@ -227,10 +233,10 @@ The shell normally expands `~` and wildcard patterns before `susu` receives its 
 susu add ~/.bashrc.*
 ```
 
-The shell decides which matching paths are passed. Quote paths containing spaces:
+The shell decides which matching paths are passed. Quote path components containing spaces, leaving the leading `~` unquoted so the shell can expand it:
 
 ```bash
-susu add "$HOME/Library/Application Support/MTMR/items.json"
+susu add ~/Library/"Application Support"/MTMR/items.json
 ```
 
 ### Sensitive files: `--sensitive`
@@ -238,11 +244,11 @@ susu add "$HOME/Library/Application Support/MTMR/items.json"
 Mark sensitive inputs explicitly:
 
 ```bash
-susu add --sensitive "$HOME/.kube/config"
-susu add --sensitive "$HOME/.ssh"
+susu add --sensitive ~/.kube/config
+susu add --sensitive ~/.ssh
 ```
 
-A sensitive directory is expanded into individually encrypted file entries. During `add`, sensitive plaintext is never copied into repository storage or a plaintext repository temporary file. The only repository copy is ciphertext under `encrypted/`. Destination staging used later by `apply` is described below.
+`--sensitive` applies only to newly managed entries, including newly discovered files in a directory. It does not convert existing public entries to encrypted storage or change existing sensitive entries. Updating an existing sensitive entry requires one unlock password even when `--sensitive` is omitted. An invocation mixing additions and updates shares that one unlock; initialization with password confirmation occurs only when there is a new sensitive entry and no repository crypto metadata. During `add`, sensitive plaintext is never copied into repository storage or a plaintext repository temporary file. The only repository copy is ciphertext under `encrypted/`. Destination staging used later by `apply` is described below.
 
 There is one password and one random 32-byte master key per repository. On the first sensitive operation, `susu` asks for the password and confirmation using a TTY with echo disabled, creates the encryption metadata, and encrypts the input. Later sensitive operations unlock the same master key with one password prompt per invocation. There is no password or key cache.
 
@@ -253,8 +259,8 @@ See the [encryption and security model](security-model.md) for the encryption de
 Stop managing one or more files:
 
 ```bash
-susu rm "$HOME/.zshrc"
-susu rm "$HOME/.gitconfig" "$HOME/.vimrc"
+susu rm ~/.zshrc
+susu rm ~/.gitconfig ~/.vimrc
 ```
 
 `rm` removes each matching entry from `susu.json` and deletes its stored `public/...` or `encrypted/...enc` repository file. It does **not** delete the original destination from your home or XDG directory.
@@ -283,8 +289,8 @@ It does not expose cryptographic implementation details.
 Print one stored entry to standard output:
 
 ```bash
-susu show "$HOME/.gitconfig"
-susu show "$HOME/.kube/config"
+susu show ~/.gitconfig
+susu show ~/.kube/config
 ```
 
 For a public entry, `show` reads the repository copy. For a sensitive entry, it prompts for the repository password, authenticates and decrypts the ciphertext in memory, and writes plaintext to stdout. It does not modify the destination, invoke `apply`, create a plaintext temporary file, or leave a decrypted repository copy.
@@ -406,20 +412,20 @@ When sensitive storage is initialized, `susu.json` also carries versioned KDF an
 A safe repository workflow keeps encryption and Git as separate, visible steps:
 
 ```bash
-susu add --sensitive "$HOME/.kube/config"
+susu add --sensitive ~/.kube/config
 
 susu ls
-git -C "$HOME/src/dotfiles" status --short
-git -C "$HOME/src/dotfiles" add susu.json encrypted
-git -C "$HOME/src/dotfiles" commit -m "Manage encrypted kube config"
-git -C "$HOME/src/dotfiles" push
+git -C ~/src/dotfiles status --short
+git -C ~/src/dotfiles add susu.json encrypted
+git -C ~/src/dotfiles commit -m "Manage encrypted kube config"
+git -C ~/src/dotfiles push
 ```
 
 On another machine:
 
 ```bash
-git -C "$HOME/src/dotfiles" pull
-susu init "$HOME/src/dotfiles"
+git -C ~/src/dotfiles pull
+susu init ~/src/dotfiles
 susu apply
 ```
 
@@ -429,7 +435,7 @@ Before committing, use `git status` to confirm that the sensitive file appears o
 
 - Only `darwin` and `linux` are supported.
 - One local `susu` installation binds to one active repository at a time.
-- `add` snapshots new entries but does not update or synchronize entries already managed.
+- `add` refreshes snapshots one file at a time, without conflict detection, backups, a global transaction, or removal of entries missing locally.
 - There are no `sync`, `status`, or `diff` commands.
 - `add` rejects explicit symlinks, skips all symlinks encountered during directory traversal, and rejects inputs that overlap or contain protected local-state, active-worktree, or Git-common-directory roots; symlinks are not preserved.
 - Shell globs are not implemented by `susu`; expansion is the shell's responsibility.

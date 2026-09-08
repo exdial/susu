@@ -9,14 +9,14 @@ The implemented command model has explicit data directions:
 | Command | Responsibility | Data direction |
 | --- | --- | --- |
 | `init <repository>` | Initialize and bind an existing Git worktree root | repository path → local binding |
-| `add [options] <path...>` | Start managing files | filesystem → repository |
+| `add [options] <path...>` | Capture new files and update exact managed snapshots | filesystem → repository |
 | `rm <path...>` | Stop managing exact files | manifest and repository storage deletion |
 | `ls` (`list` alias) | Inspect managed membership | manifest → stdout |
 | `show <path>` | Emit one stored snapshot | repository → stdout |
 | `apply` | Restore all managed snapshots | repository → filesystem |
 | `completion <shell>` | Emit static shell integration | CLI metadata → stdout |
 
-`add` captures content only when an entry first becomes managed. Repeating it for an existing entry does not refresh the repository snapshot. There is no background service, key cache, repository auto-discovery, or command that reconciles local and stored changes.
+Ordinary `add` captures new entries and refreshes snapshots for exact already-managed logical paths without an update flag. It preserves existing entry metadata, including source and sensitivity; `--sensitive` applies only to new entries. Recursive discovery refreshes managed files and adds new files without removing entries missing locally. There is no background service, key cache, repository auto-discovery, or command that reconciles local and stored changes.
 
 ## System context
 
@@ -280,7 +280,7 @@ Manifest validity is structural. Loading the manifest does not prove that every 
 
 The concrete HOME path resolved from `~/.kube/cache` and every descendant are omitted before candidate processing, independently of XDG logical-path precedence. A recursive walk returns `fs.SkipDir` at the real cache directory; captured directory identity also recognizes physical and filesystem case aliases without following a final cache symlink. The same concrete-path check drops explicitly supplied regular files and real directories. Similar siblings such as `~/.kube/cache.yaml` and `~/.kube/caches/` are not excluded. Explicit symlink and special-file rules retain precedence. If all inputs are ignored, `add` returns without repository mutation or password processing. Existing manifest entries are not removed by this discovery policy.
 
-Candidate discovery completes before repository sources are written. After any required password callback, `add` performs a command-wide preflight that reopens and validates every new candidate against all protected control roots before reading any candidate content or writing any repository source. This catches a protected path substituted during password entry without partially processing an earlier candidate. Each file is then reopened through the confined filesystem layer immediately before reading; the descriptor that is verified as regular is the descriptor read. Both passes repeat canonical/physical repository-root checks and compare the opened descriptor's filesystem identity with protected local-state file identities captured under the state lock. If a candidate is later redirected into a protected root, changed to a symlink or non-regular object, or replaced by a hard link to protected local state, that candidate fails before its content is read or stored.
+Candidate discovery completes before repository sources are written. After any required password callback, `add` performs a command-wide preflight that reopens and validates every new or update candidate against all protected control roots before reading any candidate content or writing any repository source. This catches a protected path substituted during password entry without partially processing an earlier candidate. Each file is then reopened through the confined filesystem layer immediately before reading; the descriptor that is verified as regular is the descriptor read. Both passes repeat canonical/physical repository-root checks and compare the opened descriptor's filesystem identity with protected local-state file identities captured under the state lock. If a candidate is later redirected into a protected root, changed to a symlink or non-regular object, or replaced by a hard link to protected local state, that candidate fails before its content is read or stored.
 
 This is not a simultaneous snapshot of a directory tree. Files are read one at a time and are not locked against modification by other processes, so concurrent writers can change bytes while or between files being captured.
 
@@ -318,26 +318,28 @@ A no-argument invocation is a valid presentation flow. It calls the app overview
 
 Repository scaffolding and local binding are separate commits. If binding validation or the state write fails after scaffolding succeeds, the repository can remain initialized. A state failure before rename leaves the previous binding unchanged or absent; a post-rename directory-sync failure leaves the new binding committed with uncertain durability.
 
-### `add`: capture initial membership and content
+### `add`: capture new entries and update managed snapshots
 
 For one invocation, `add`:
 
 1. opens the bound repository and loads the manifest under both locks;
 2. rejects inputs that overlap or contain the private state directory, active worktree, or Git common directory;
 3. discovers and sorts all regular-file candidates;
-4. classifies exact logical entries and different logical candidates that share filesystem identity with an existing managed regular leaf as already managed;
-5. rejects the complete invocation if two new candidates share one physical file identity;
-6. unlocks or initializes repository crypto once when at least one new sensitive entry exists;
-7. revalidates every new candidate command-wide after the password callback;
+4. classifies exact logical entries as updates, new paths as additions, and different logical candidates sharing an existing managed regular leaf's filesystem identity as `AlreadyManaged` skips;
+5. rejects candidates with multiple managed owners and rejects two new candidates sharing one physical file identity;
+6. unlocks repository crypto once if any existing sensitive update or new sensitive addition needs it, initializing only when new sensitive entries exist and crypto metadata is absent;
+7. revalidates every new or update candidate command-wide after the password callback;
 8. repeats command-wide physical-identity and boundary checks before each read, then reads through the same validated no-follow descriptor with a 512 MiB per-file limit;
 9. encrypts sensitive bytes in memory or retains public bytes;
-10. atomically installs each new repository source without replacing an existing path;
-11. rechecks every candidate once more before the manifest transition; and
-12. atomically replaces `susu.json` after all new sources are installed.
+10. atomically installs each new repository source without replacing an existing path, or atomically replaces an existing update source after requiring it to be a present regular no-follow file;
+11. rechecks every candidate once more before any manifest transition; and
+12. atomically replaces `susu.json` after all new sources are installed if there are additions; update-only invocations do not rewrite the manifest.
 
-Physical identity uses `os.SameFile` metadata obtained from opened candidate descriptors. Existing managed leaves are inspected with `Lstat`: a regular hard link, case alias, or normalization alias exposed by the filesystem is recognized, while a leaf symlink does not make its target already managed. Already-managed entries keep their original source bytes and sensitivity. A sensitive invocation containing only exact or physical aliases of already-managed paths does not prompt for a password. Existing unreferenced data at a candidate's deterministic source path is treated as a collision and is not overwritten. A late identity conflict rolls back repository sources created earlier in that invocation.
+Physical identity uses `os.SameFile` metadata obtained from opened candidate descriptors. Existing managed leaves are inspected with `Lstat`: a regular hard link, case alias, or normalization alias exposed by the filesystem is recognized, while a leaf symlink does not make its target already managed. Exact updates preserve the existing `Entry`, including its source path and sensitivity, but replace its stored bytes. `--sensitive` cannot reclassify an existing entry. Existing sensitive updates require one unlock password even without that flag. Different-logical-path aliases preserve their owner's snapshot and never require a password solely for the alias. Existing unreferenced data at a candidate's deterministic source path is treated as a collision and is not overwritten. A late identity conflict triggers best-effort rollback of newly created sources if the manifest has not committed, but does not undo already-committed updates.
 
-The no-overwrite source install uses a random same-directory temporary file, file synchronization, and an atomic hard link to the final name. This preserves the rule that `add` starts management rather than silently updating an existing snapshot.
+New-source installation retains the no-overwrite protocol: a random same-directory temporary file, file synchronization, and an atomic hard link to the final name. Updates instead reuse `atomicReplaceRooted`: stage in a same-directory `.susu-apply-<24 hex characters>.tmp` file, sync and close it, rename over the existing source, then sync the directory. Despite the staging prefix, sensitive updates stage only ciphertext in the repository. Missing, symlinked, or special-file update sources are errors rather than opportunities to create or repair storage.
+
+The app result distinguishes `Added`, `Updated`, and `AlreadyManaged`. The CLI prints these in `added`, `updated`, and `already managed` groups, including committed results when returning an error.
 
 ### `rm`: remove membership without touching destinations
 
@@ -401,11 +403,14 @@ The repository is a set of ordinary files, so multi-file commands use ordered co
 | Local binding save | temporary file → file sync → rename → directory sync | Before rename, the previous binding remains; a post-rename directory-sync error reports uncertain durability |
 | Manifest save | temporary file → file sync → rename → directory sync | Before rename, the previous manifest remains; a post-rename directory-sync error is reported as committed with uncertain durability |
 | New source install | temporary file → file sync → no-replace hard link → temporary unlink → directory sync | An existing final path is never replaced; ordinary pre-commit failures remove the temporary file |
-| `add` | install all sources → replace manifest | A non-committed manifest failure triggers best-effort removal of sources created by that invocation; a committed manifest is never rolled back |
+| `add` additions | install new sources → replace manifest | A failure before manifest commit triggers best-effort removal of newly created sources; a committed manifest is never rolled back and additions are reported as `Added`, even on a post-rename sync error |
+| `add` updates | validate existing regular no-follow source → staging file → file sync → rename → directory sync | Each committed replacement remains and is reported as `Updated`, even on a post-rename sync error or later invocation failure; update-only invocations do not save the manifest |
 | `rm` | replace manifest → remove sources | The manifest stops referencing entries before deletion; cleanup failures can leave unreferenced sources and are returned with the removed identities |
 | Destination restore | staging file → file sync → rename → directory sync | Atomic per destination, not across the command; a post-rename sync failure reports the path as applied |
 
-The source-first `add` ordering and manifest-first `rm` ordering favor orphaned data over a manifest that intentionally references a missing file. Process termination, power loss, or failed best-effort cleanup can still leave unreferenced sources, empty directories, or temporary files. State, manifest, and add-source temporaries are removed on ordinary error paths but are not globally scavenged after a crash.
+There is no global `add` transaction or snapshot backup. In a mixed invocation, failure before manifest commit can leave updated existing snapshots alongside rolled-back additions. A post-rename directory-sync error means replacement has committed but durability is uncertain. Update staging uses the same exact-name best-effort cleanup as `apply`; later invocations do not scavenge neighboring staging-like names. Sensitive update residue contains ciphertext, not plaintext.
+
+The new-source-first `add` ordering and manifest-first `rm` ordering favor orphaned data over a manifest that intentionally references a missing file. Process termination, power loss, or failed best-effort cleanup can still leave unreferenced sources, empty directories, or temporary files. State, manifest, and add-source temporaries are removed on ordinary error paths but are not globally scavenged after a crash.
 
 `apply` has a stronger preflight for repository structure and sensitive authentication than for destination I/O:
 
@@ -475,7 +480,7 @@ The implemented model has these deliberate or practical limits:
 - Only macOS (`darwin`) and Linux are supported.
 - One XDG state home binds one active repository path at a time; the binding does not pin filesystem or Git identity.
 - Managed destinations are limited to `HOME` and `XDG_CONFIG_HOME`; arbitrary absolute destinations and other XDG base directories are not represented.
-- Existing entries cannot be refreshed through `add`; it is membership capture, not synchronization.
+- `add` updates exact managed snapshots without conflict detection or backups; it does not reconcile deletions or provide command-wide rollback.
 - Restore overwrites managed destinations without conflict detection against local contents, backups, or a command-wide rollback.
 - Entries represent regular files only. Symlinks, special files, empty directories, and directory metadata are not preserved.
 - Recursive input and destination application reject canonical or physical overlap with the private state directory, active worktree, and Git common directory. The implementation does not perform a global reverse-inode search for arbitrary regular-file hard links into repository or Git trees; current destination replacement installs a new inode rather than writing through an existing hard link.
@@ -494,7 +499,8 @@ Changes to supported behavior are complete only when the relevant automated test
 
 - `init` Git-root validation and machine-local repository binding;
 - HOME normalization, XDG config normalization, and fallback to `~/.config`;
-- public, sensitive, multiple-file, duplicate, and recursive `add` behavior, including built-in exclusions;
+- public, sensitive, mixed, multiple-file, duplicate, and recursive `add` behavior, including refreshes without a flag, preserved source/sensitivity, one unlock, alias-only no-prompt skips, multiple-owner rejection, retained missing local entries, and unchanged built-in exclusions;
+- update-source no-follow regular-file requirements, new-source collision protection, ciphertext-only update staging, committed `Updated`/`Added` error reporting, addition rollback without update rollback, and no manifest rewrite for update-only invocations;
 - `rm`, `ls` and its `list` alias, public and sensitive `show`, and public and sensitive `apply`;
 - encryption/decryption round trips, wrong passwords, corrupted ciphertext, and invalid or unsupported formats;
 - paths containing spaces; and

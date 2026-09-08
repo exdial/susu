@@ -48,17 +48,17 @@ make install
 Create and select a Git repository, then add the files you want to manage:
 
 ```bash
-mkdir -p "$HOME/src"
-git init "$HOME/src/dotfiles"
+mkdir -p ~/src
+git init ~/src/dotfiles
 
-susu init "$HOME/src/dotfiles"
-susu add "$HOME/.zshrc" "$HOME/.gitconfig"
-susu add --sensitive "$HOME/.kube/config"
+susu init ~/src/dotfiles
+susu add ~/.zshrc ~/.gitconfig
+susu add --sensitive ~/.kube/config
 
 susu ls
 
-git -C "$HOME/src/dotfiles" add susu.json public encrypted
-git -C "$HOME/src/dotfiles" commit -m "Manage dotfiles with susu"
+git -C ~/src/dotfiles add susu.json public encrypted
+git -C ~/src/dotfiles commit -m "Manage dotfiles with susu"
 ```
 
 The first sensitive operation asks for a repository password and confirmation. The password is never stored.
@@ -66,8 +66,8 @@ The first sensitive operation asks for a repository password and confirmation. T
 On another machine, use Git to retrieve the repository and `susu` to restore its files:
 
 ```bash
-git clone <repository-url> "$HOME/src/dotfiles"
-susu init "$HOME/src/dotfiles"
+git clone <repository-url> ~/src/dotfiles
+susu init ~/src/dotfiles
 susu ls
 susu apply
 ```
@@ -79,7 +79,7 @@ susu apply
 | Command | Purpose |
 | --- | --- |
 | `susu init <repository>` | Initialize susu in an existing Git repository |
-| `susu add [options] <path...>` | Start managing files or directories |
+| `susu add [options] <path...>` | Capture new files or update managed snapshots, including recursively |
 | `susu rm <path...>` | Stop managing files |
 | `susu ls` | List managed files (`susu list` is an alias) |
 | `susu show <path>` | Print a stored file |
@@ -96,7 +96,9 @@ source <(susu completion zsh)                   # Zsh
 
 Running `susu` without a command shows a short onboarding before initialization, or the active repository and managed file count afterward. Use `susu --help` for the complete command overview.
 
-`add` captures a file only when it first becomes managed; it does not synchronize entries that already exist. Recursive adds and explicit regular-file or real-directory inputs ignore `~/.kube/cache` and everything below it. Sensitive classification is always explicit. The machine-local `susu` state directory, active repository worktree, and Git common administrative directory are reserved control roots: `add` rejects inputs that overlap or contain them, and `apply` refuses manifest destinations that would overlap them.
+Ordinary `susu add <path...>` captures new files and refreshes snapshots for exact already-managed logical paths; no update flag is needed. Existing entries keep their source path and sensitivity regardless of `--sensitive`, which applies only to new entries. Updating an existing sensitive entry asks for one unlock password even without the flag. Recursive adds refresh discovered managed files and add new ones, but do not remove entries missing locally. A different logical path naming the same managed inode is skipped as `already managed`, without a password solely for that alias. The CLI prints `added`, `updated`, and `already managed` groups. Updates are atomic per file, not a global transaction: committed updates remain after a later failure, and no backups are created. See the [reference](docs/reference.md#susu-add) for addition rollback and failure reporting.
+
+Recursive adds and explicit regular-file or real-directory inputs ignore `~/.kube/cache` and everything below it. Sensitive classification is always explicit. The machine-local `susu` state directory, active repository worktree, and Git common administrative directory are reserved control roots: `add` rejects inputs that overlap or contain them, and `apply` refuses manifest destinations that would overlap them.
 
 ## A little lore
 
